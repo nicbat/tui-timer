@@ -16,6 +16,7 @@ use std::{
 #[serde(default)]
 struct Settings {
     stopwatch: bool,
+    hundredths: bool,
     seconds: u64,
     prep: u64,
     size: u16,
@@ -31,6 +32,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             stopwatch: false,
+            hundredths: true,
             seconds: 120,
             prep: 5,
             size: 0,
@@ -182,6 +184,8 @@ fn valid_name(name: &str) -> bool {
             "font",
             "timer",
             "stopwatch",
+            "hundredths",
+            "no-hundredths",
             "countdown",
             "size",
             "theme",
@@ -214,7 +218,8 @@ fn args(config: &mut Config, argv: &[String]) -> Result<bool, String> {
                     return Err(format!("{a} needs a value"));
                 }
             }
-            "--pomodoro" | "--stopwatch" | "--bell" | "--no-bell" | "--no-countdown" => {}
+            "--pomodoro" | "--stopwatch" | "--bell" | "--no-bell" | "--no-countdown"
+            | "--hundredths" | "--no-hundredths" => {}
             _ if a.starts_with("--") && config.presets.contains_key(&a[2..]) => {
                 preset = Some(a[2..].into())
             }
@@ -238,6 +243,8 @@ fn args(config: &mut Config, argv: &[String]) -> Result<bool, String> {
                 config.settings.stopwatch = false;
                 config.settings.pomodoro = false;
             }
+            "--hundredths" => config.settings.hundredths = true,
+            "--no-hundredths" => config.settings.hundredths = false,
             "--stopwatch" => {
                 config.settings.stopwatch = true;
                 config.settings.pomodoro = false;
@@ -423,6 +430,7 @@ impl Clock {
 #[derive(Clone, Copy, PartialEq)]
 enum Field {
     Mode,
+    Hundredths,
     Duration,
     Rest,
     Cycles,
@@ -476,6 +484,9 @@ impl App {
     }
     fn fields(&self) -> Vec<Field> {
         let mut fields = vec![Field::Mode];
+        if self.config.settings.stopwatch {
+            fields.push(Field::Hundredths);
+        }
         if !self.config.settings.stopwatch {
             fields.push(Field::Duration);
         }
@@ -716,9 +727,9 @@ impl App {
                     let s = &mut self.config.settings;
                     let adjust = |v: u64, step: u64, min: u64, max: u64| {
                         if plus {
-                            (v + step).min(max)
+                            ((v / step + 1) * step).min(max)
                         } else {
-                            v.saturating_sub(step).max(min)
+                            (v.saturating_sub(1) / step * step).max(min)
                         }
                     };
                     match field {
@@ -741,6 +752,7 @@ impl App {
                         Field::Rest => s.rest_seconds = adjust(s.rest_seconds, 60, 1, 359999),
                         Field::Cycles => s.cycles = adjust(s.cycles as u64, 1, 1, 99) as u16,
                         Field::Prep => s.prep = adjust(s.prep, 1, 0, 3600),
+                        Field::Hundredths => s.hundredths = !s.hundredths,
                         Field::Font => s.font = (s.font + if plus { 1 } else { 2 }) % 3,
                         Field::Size => self.zoom(plus),
                         Field::Theme => s.theme = (s.theme + if plus { 1 } else { 3 }) % 4,
@@ -821,7 +833,7 @@ impl App {
     }
 }
 
-const DIGITS: [[&str; 5]; 11] = [
+const DIGITS: [[&str; 5]; 12] = [
     ["111", "101", "101", "101", "111"],
     ["010", "110", "010", "010", "111"],
     ["111", "001", "111", "100", "111"],
@@ -833,7 +845,16 @@ const DIGITS: [[&str; 5]; 11] = [
     ["111", "101", "111", "101", "111"],
     ["111", "101", "111", "001", "111"],
     ["0", "1", "0", "1", "0"],
+    ["0", "0", "0", "0", "1"],
 ];
+fn display_stopwatch(elapsed: Duration, hundredths: bool) -> String {
+    let whole = display_time(elapsed.as_secs());
+    if hundredths {
+        format!("{whole}.{:02}", elapsed.subsec_millis() / 10)
+    } else {
+        whole
+    }
+}
 fn display_time(seconds: u64) -> String {
     if seconds >= 3600 {
         format!(
@@ -846,7 +867,7 @@ fn display_time(seconds: u64) -> String {
         format!("{:02}:{:02}", seconds / 60, seconds % 60)
     }
 }
-const SLIM: [[&str; 7]; 11] = [
+const SLIM: [[&str; 7]; 12] = [
     [
         "01110", "10001", "10001", "10001", "10001", "10001", "01110",
     ],
@@ -878,12 +899,13 @@ const SLIM: [[&str; 7]; 11] = [
         "01110", "10001", "10001", "01111", "00001", "00001", "01110",
     ],
     ["0", "0", "1", "0", "1", "0", "0"],
+    ["0", "0", "0", "0", "0", "0", "1"],
 ];
 fn digit_fit(area: Rect, text: &str, font: usize) -> u16 {
     let units: u16 = text
         .chars()
         .map(|c| {
-            if c == ':' {
+            if c == ':' || c == '.' {
                 1
             } else if font == 1 {
                 5
@@ -931,7 +953,10 @@ fn big_digits(
         let line = text
             .chars()
             .map(|c| {
-                let index = c.to_digit(10).map(|n| n as usize).unwrap_or(10);
+                let index =
+                    c.to_digit(10)
+                        .map(|n| n as usize)
+                        .unwrap_or(if c == '.' { 11 } else { 10 });
                 let pattern = if font == 1 {
                     SLIM[index][row]
                 } else {
@@ -1028,7 +1053,11 @@ fn ui(f: &mut Frame, app: &mut App) {
         return;
     }
     if app.clock.phase == Phase::Setup {
-        let panel = centered(area, 72, area.height.saturating_sub(2));
+        let panel = centered(
+            area,
+            if s.stopwatch && s.hundredths { 88 } else { 72 },
+            area.height.saturating_sub(2),
+        );
         let fields = app.fields();
         let rows = Layout::vertical([
             Constraint::Length(2),
@@ -1076,6 +1105,14 @@ fn ui(f: &mut Frame, app: &mut App) {
                             format!("{}s before starting", s.prep)
                         },
                     ),
+                    Field::Hundredths => (
+                        "Hundredths",
+                        if s.hundredths {
+                            "On · 00:00.00".into()
+                        } else {
+                            "Off · 00:00".into()
+                        },
+                    ),
                     Field::Font => ("Digit font", ["Block", "Slim", "Dots"][s.font].into()),
                     Field::Size => (
                         "Digit size",
@@ -1108,11 +1145,27 @@ fn ui(f: &mut Frame, app: &mut App) {
             .collect::<Vec<_>>();
         f.render_widget(Paragraph::new(lines), rows[1]);
         let preview = if s.stopwatch {
-            "00:00".into()
+            display_stopwatch(Duration::ZERO, s.hundredths)
         } else {
             display_time(s.duration())
         };
-        let (scale, fit) = big_digits(f, rows[2], &preview, s.size, s.font, accent);
+        let preview_area = if s.pomodoro {
+            let columns =
+                Layout::horizontal([Constraint::Percentage(75), Constraint::Percentage(25)])
+                    .split(rows[2]);
+            let rest_area = centered(columns[1], 18, 5);
+            f.render_widget(
+                Paragraph::new(format!("\n{}", display_time(s.rest_seconds)))
+                    .centered()
+                    .block(Block::default().borders(Borders::ALL).title(" Rest "))
+                    .style(Color::Rgb(125, 194, 245)),
+                rest_area,
+            );
+            columns[0]
+        } else {
+            rows[2]
+        };
+        let (scale, fit) = big_digits(f, preview_area, &preview, s.size, s.font, accent);
         app.rendered_scale = scale;
         app.max_scale = fit;
         f.render_widget(Paragraph::new("↑↓ / j k select   ←→ / h l change   e / i type\nEnter start   p presets   s save edits   n new preset\na auto-fit   q quit").centered().style(muted),rows[3]);
@@ -1138,6 +1191,8 @@ fn ui(f: &mut Frame, app: &mut App) {
         };
         let text = if app.clock.phase == Phase::Prep {
             value.to_string()
+        } else if s.stopwatch {
+            display_stopwatch(elapsed, s.hundredths)
         } else {
             display_time(value)
         };
@@ -1630,6 +1685,112 @@ mod tests {
             assert!(!content.contains("PAUSED"));
             assert!(!content.contains("TIME REMAINING"));
             assert!(content.contains(if font == 2 { "●" } else { "█" }));
+        }
+    }
+    #[test]
+    fn duration_arrows_snap_to_grid_in_both_directions() {
+        let mut app = App::new(Config::default(), PathBuf::new());
+        app.selected = 1;
+        for (initial, right, expected) in [
+            (1, true, 15),
+            (16, true, 30),
+            (16, false, 15),
+            (61, false, 60),
+            (60, true, 75),
+            (15, false, 1),
+            (1, false, 1),
+            (359999, false, 359985),
+        ] {
+            app.config.settings.seconds = initial;
+            app.key(if right { KeyCode::Right } else { KeyCode::Left });
+            assert_eq!(app.config.settings.seconds, expected);
+        }
+        app.config.settings.pomodoro = true;
+        for field in [1, 2] {
+            app.selected = field;
+            app.config.settings.work_seconds = 1;
+            app.config.settings.rest_seconds = 1;
+            app.key(KeyCode::Char('l'));
+            assert_eq!(
+                if field == 1 {
+                    app.config.settings.work_seconds
+                } else {
+                    app.config.settings.rest_seconds
+                },
+                60
+            );
+            app.key(KeyCode::Char('l'));
+            assert_eq!(
+                if field == 1 {
+                    app.config.settings.work_seconds
+                } else {
+                    app.config.settings.rest_seconds
+                },
+                120
+            );
+            app.key(KeyCode::Char('h'));
+            assert_eq!(
+                if field == 1 {
+                    app.config.settings.work_seconds
+                } else {
+                    app.config.settings.rest_seconds
+                },
+                60
+            );
+        }
+    }
+    #[test]
+    fn stopwatch_hundredths_format_and_toggle() {
+        for (ms, expected) in [
+            (0, "00:00.00"),
+            (9, "00:00.00"),
+            (10, "00:00.01"),
+            (999, "00:00.99"),
+            (1000, "00:01.00"),
+            (61239, "01:01.23"),
+            (3600000, "01:00:00.00"),
+        ] {
+            assert_eq!(display_stopwatch(Duration::from_millis(ms), true), expected);
+        }
+        assert_eq!(
+            display_stopwatch(Duration::from_millis(61239), false),
+            "01:01"
+        );
+        let mut app = App::new(Config::default(), PathBuf::new());
+        args(
+            &mut app.config,
+            &["--stopwatch".into(), "--no-hundredths".into()],
+        )
+        .unwrap();
+        assert!(!app.config.settings.hundredths);
+        app.selected = 1;
+        app.key(KeyCode::Right);
+        assert!(app.config.settings.hundredths);
+        assert_eq!(DIGITS[11], ["0", "0", "0", "0", "1"]);
+    }
+    #[test]
+    fn rest_preview_and_hundredths_fit_at_normal_terminal_sizes() {
+        for (width, height) in [(60, 24), (80, 24), (100, 30)] {
+            let mut app = App::new(Config::default(), PathBuf::new());
+            app.config.settings.pomodoro = true;
+            let mut terminal =
+                Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+            terminal.draw(|f| ui(f, &mut app)).unwrap();
+            let text = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|c| c.symbol())
+                .collect::<String>();
+            assert!(text.contains("┌ Rest "));
+            assert!(text.contains("05:00"));
+            app.config.settings.pomodoro = false;
+            app.config.settings.stopwatch = true;
+            for font in 0..3 {
+                app.config.settings.font = font;
+                terminal.draw(|f| ui(f, &mut app)).unwrap();
+            }
         }
     }
 }

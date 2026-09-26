@@ -56,9 +56,21 @@ Restart starts the entire sequence again, including preparation.
 - **p**: open the preset manager. **s**: save edits to the loaded preset.
 - **n**: save current settings as a new preset.
 
+Arrow adjustments snap timers to the next/previous 15-second mark and Pomodoro
+work/rest periods to the next/previous minute. From the 1-second minimum, Right
+therefore moves to 15 seconds or 1 minute. Typed durations remain exact.
+
 The bottom of setup previews the current time, digit style, size, and accent.
+Pomodoro also shows a compact rest countdown beside the work preview.
 Digit fonts are **Block**, **Slim**, and **Dots**. These are built-in large-digit
 styles; the terminal controls the font used for ordinary interface text.
+
+## Stopwatch precision
+
+Stopwatches show hundredths by default: `00:00.00` (two decimal places). Toggle
+**Hundredths** in setup, or use `--no-hundredths` / `--hundredths`. This preference
+is remembered and saved with presets. Pausing freezes the fractional time too.
+After an hour, the display becomes `01:00:00.00`.
 
 ## Presets
 
@@ -102,6 +114,7 @@ continue to load; omitted new fields get defaults. Fields:
 - `stopwatch`, `pomodoro`: booleans; both false means timer, only one can be true.
 - `seconds`: timer duration; `work_seconds`, `rest_seconds`: Pomodoro durations.
 - `cycles`: 1–99 work/rest pairs.
+- `hundredths`: show stopwatch fractional seconds (defaults to true).
 - `prep`: 0–3600 seconds of get-ready countdown, separate from the timer. Zero is off.
   The one-hour limit applies only to this optional countdown, not to work or rest.
 - `font`: 0 Block, 1 Slim, 2 Dots. `size`: 0 auto-fit or 1–8.

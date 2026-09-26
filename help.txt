@@ -8,6 +8,7 @@ USAGE
   tui-timer --pomodoro --work 25m --rest 5m --cycles 4
 
 OPTIONS
+  --hundredths / --no-hundredths     Show/hide stopwatch hundredths
   --work DURATION                   Pomodoro work period (default 25m)
   --rest DURATION                   Pomodoro rest period (default 5m)
   --cycles 1–99                     Work/rest pairs (default 4)

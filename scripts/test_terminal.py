@@ -161,6 +161,7 @@ with tempfile.TemporaryDirectory() as temp:
     assert terminal.read() == before, 'Paused session display changed'
     terminal.send('\x1b')
     terminal.expect('Work duration')
+    terminal.expect('┌ Rest ')
     terminal.capture('pomodoro-settings')
     terminal.send('jjje3\r')
     terminal.send('s')
@@ -178,9 +179,24 @@ with tempfile.TemporaryDirectory() as temp:
     terminal.expect('Space pause')
     terminal.send(' ')
     terminal.expect('Space to resume')
+    frozen = terminal.read()
+    terminal.read(.2)
+    assert terminal.read() == frozen
     terminal.capture('dots')
     terminal.send('\x1b')
     terminal.expect('Stopwatch')
+    terminal.expect('On · 00:00.00')
+    terminal.send('jl')
+    terminal.expect('Off · 00:00')
+    terminal.send('\r')
+    terminal.expect('Space pause')
+    terminal.close()
+    assert tomllib.loads(config.read_text())['settings']['hundredths'] is False
+
+    terminal = Terminal(config, '--stopwatch', '--hundredths', '--font', 'block', '--no-countdown')
+    terminal.expect('Space pause')
+    terminal.read(.2)
+    terminal.capture('stopwatch')
     terminal.close()
 
     timings = []
