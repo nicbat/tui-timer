@@ -1,4 +1,6 @@
+mod effects;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use effects::{CONFETTI_DURATION, THEMES};
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Clear, Gauge, Paragraph},
@@ -22,6 +24,7 @@ struct Settings {
     size: u16,
     theme: usize,
     bell: bool,
+    confetti: bool,
     pomodoro: bool,
     work_seconds: u64,
     rest_seconds: u64,
@@ -38,6 +41,7 @@ impl Default for Settings {
             size: 0,
             theme: 0,
             bell: false,
+            confetti: false,
             pomodoro: false,
             work_seconds: 1500,
             rest_seconds: 300,
@@ -90,7 +94,7 @@ fn validate(s: &mut Settings) -> Result<(), String> {
         || s.seconds > 359999
         || s.prep > 3600
         || s.size > 8
-        || s.theme > 3
+        || s.theme >= THEMES.len()
         || s.work_seconds == 0
         || s.work_seconds > 359999
         || s.rest_seconds == 0
@@ -99,7 +103,7 @@ fn validate(s: &mut Settings) -> Result<(), String> {
         || s.font > 2
         || (s.stopwatch && s.pomodoro)
     {
-        return Err("Config values out of range: durations 1s–99h59m59s, get ready 0–3600s, cycles 1–99, size 0–8, theme 0–3, font 0–2; choose one mode".into());
+        return Err("Config values out of range: durations 1s–99h59m59s, get ready 0–3600s, cycles 1–99, size 0–8, theme 0–9, font 0–2; choose one mode".into());
     }
     Ok(())
 }
@@ -190,6 +194,8 @@ fn valid_name(name: &str) -> bool {
             "size",
             "theme",
             "bell",
+            "confetti",
+            "no-confetti",
             "no-bell",
             "help",
             "version",
@@ -219,7 +225,7 @@ fn args(config: &mut Config, argv: &[String]) -> Result<bool, String> {
                 }
             }
             "--pomodoro" | "--stopwatch" | "--bell" | "--no-bell" | "--no-countdown"
-            | "--hundredths" | "--no-hundredths" => {}
+            | "--hundredths" | "--no-hundredths" | "--confetti" | "--no-confetti" => {}
             _ if a.starts_with("--") && config.presets.contains_key(&a[2..]) => {
                 preset = Some(a[2..].into())
             }
@@ -287,11 +293,19 @@ fn args(config: &mut Config, argv: &[String]) -> Result<bool, String> {
             }
             "--theme" => {
                 i += 1;
-                config.settings.theme = ["mint", "amber", "ice", "mono"]
-                    .iter()
-                    .position(|t| *t == argv[i])
-                    .ok_or("Theme must be mint, amber, ice, or mono")?;
+                config.settings.theme =
+                    THEMES
+                        .iter()
+                        .position(|t| t.name == argv[i])
+                        .ok_or_else(|| {
+                            format!(
+                                "Theme must be one of: {}",
+                                THEMES.iter().map(|t| t.name).collect::<Vec<_>>().join(", ")
+                            )
+                        })?;
             }
+            "--confetti" => config.settings.confetti = true,
+            "--no-confetti" => config.settings.confetti = false,
             "--bell" => config.settings.bell = true,
             "--no-bell" => config.settings.bell = false,
             "--preset" => i += 1,
@@ -439,6 +453,7 @@ enum Field {
     Size,
     Theme,
     Bell,
+    Confetti,
 }
 #[derive(Clone)]
 enum Edit {
@@ -464,6 +479,7 @@ struct App {
     delete: Option<String>,
     rendered_scale: u16,
     max_scale: u16,
+    celebration: Option<Instant>,
 }
 impl App {
     fn new(config: Config, path: PathBuf) -> Self {
@@ -480,7 +496,31 @@ impl App {
             delete: None,
             rendered_scale: 1,
             max_scale: 8,
+            celebration: None,
         }
+    }
+    fn advance(&mut self, now: Instant) -> bool {
+        let before = self.clock.phase;
+        let transitioned = self.clock.tick(&self.config.settings, now);
+        if before != Phase::Done && self.clock.phase == Phase::Done && self.config.settings.confetti
+        {
+            self.celebration = Some(now);
+        } else if self.clock.phase != Phase::Done
+            || self
+                .celebration
+                .is_some_and(|start| now.saturating_duration_since(start) >= CONFETTI_DURATION)
+        {
+            self.celebration = None;
+        }
+        transitioned
+    }
+    fn animating(&self, now: Instant) -> bool {
+        (!self.clock.paused
+            && matches!(self.clock.phase, Phase::Prep | Phase::Running | Phase::Rest))
+            || (self.clock.phase == Phase::Done
+                && self
+                    .celebration
+                    .is_some_and(|start| now.saturating_duration_since(start) < CONFETTI_DURATION))
     }
     fn fields(&self) -> Vec<Field> {
         let mut fields = vec![Field::Mode];
@@ -499,12 +539,18 @@ impl App {
             Field::Size,
             Field::Theme,
             Field::Bell,
+            Field::Confetti,
         ]);
         fields
     }
     fn persist(&mut self) -> bool {
         match save(&self.path, &self.config) {
-            Ok(()) => true,
+            Ok(()) => {
+                if self.message.starts_with("Couldn't save") {
+                    self.message.clear();
+                }
+                true
+            }
             Err(e) => {
                 self.message = format!("Couldn't save settings: {e}");
                 false
@@ -594,7 +640,8 @@ impl App {
                     let same = matches!(&input.kind, Edit::Rename(old) if old == name);
                     if !valid_name(name) {
                         self.message =
-                            "Name: start with a–z; use a–z, 0–9, hyphens (max 32).".into();
+                            "Use a–z, 0–9, hyphens; start with a letter. CLI names are reserved."
+                                .into();
                     } else if self.config.presets.contains_key(name) && !same {
                         self.message = "That name already exists. Choose another name.".into();
                     } else {
@@ -707,8 +754,7 @@ impl App {
             return false;
         }
         if key == KeyCode::Char('q') {
-            self.persist();
-            return true;
+            return self.persist();
         }
         if self.clock.phase == Phase::Setup {
             let fields = self.fields();
@@ -755,8 +801,12 @@ impl App {
                         Field::Hundredths => s.hundredths = !s.hundredths,
                         Field::Font => s.font = (s.font + if plus { 1 } else { 2 }) % 3,
                         Field::Size => self.zoom(plus),
-                        Field::Theme => s.theme = (s.theme + if plus { 1 } else { 3 }) % 4,
+                        Field::Theme => {
+                            s.theme =
+                                (s.theme + if plus { 1 } else { THEMES.len() - 1 }) % THEMES.len()
+                        }
                         Field::Bell => s.bell = !s.bell,
+                        Field::Confetti => s.confetti = !s.confetti,
                     }
                 }
                 KeyCode::Char('e') | KeyCode::Char('i')
@@ -814,6 +864,10 @@ impl App {
                 KeyCode::Char(' ') if self.clock.phase != Phase::Done => {
                     self.clock.toggle(Instant::now())
                 }
+                KeyCode::Char('c') if self.clock.phase == Phase::Done => {
+                    self.celebration = Some(Instant::now())
+                }
+                KeyCode::Char(' ') if self.clock.phase == Phase::Done => self.celebration = None,
                 KeyCode::Char('r') => self.clock.start(&self.config.settings, Instant::now()),
                 KeyCode::Enter if self.clock.phase == Phase::Done => {
                     self.clock.start(&self.config.settings, Instant::now())
@@ -1021,15 +1075,21 @@ fn session_remaining(clock: &Clock, s: &Settings, now: Instant) -> u64 {
     };
     current + future
 }
+fn running_hint(width: u16, phase: Phase, paused: bool) -> String {
+    if phase == Phase::Done {
+        return "Enter restart  c confetti\nSpace dismiss\nEsc settings  q quit".into();
+    }
+    let action = if paused { "resume" } else { "pause" };
+    if width < 90 {
+        format!("Space {action}  r restart\nEsc settings  q quit\nh/l or -/+ zoom  a auto-fit")
+    } else {
+        format!("Space {action}   r restart   Esc settings   h/l or -/+ zoom   a auto-fit   q quit")
+    }
+}
 fn ui(f: &mut Frame, app: &mut App) {
     let area = f.area();
     let s = &app.config.settings;
-    let accent = [
-        Color::Rgb(116, 224, 181),
-        Color::Rgb(245, 192, 106),
-        Color::Rgb(125, 194, 245),
-        Color::White,
-    ][s.theme];
+    let accent = THEMES[s.theme].accent;
     let muted = Color::Rgb(135, 146, 160);
     let bg = Color::Rgb(15, 19, 25);
     let amber = Color::Rgb(245, 192, 106);
@@ -1037,6 +1097,11 @@ fn ui(f: &mut Frame, app: &mut App) {
         Block::default().style(Style::default().bg(bg).fg(Color::Rgb(222, 229, 237))),
         area,
     );
+    if app.clock.phase == Phase::Done
+        && let Some(started) = app.celebration
+    {
+        effects::confetti(f, area, started.elapsed(), accent);
+    }
     let (min_w, min_h) = if app.clock.phase == Phase::Setup {
         (60, 24)
     } else {
@@ -1122,9 +1187,17 @@ fn ui(f: &mut Frame, app: &mut App) {
                             format!("{} · a restores auto-fit", s.size)
                         },
                     ),
-                    Field::Theme => ("Color", ["Mint", "Amber", "Ice", "Mono"][s.theme].into()),
+                    Field::Theme => ("Color", THEMES[s.theme].label.into()),
+                    Field::Confetti => (
+                        "Finish effect",
+                        if s.confetti {
+                            "Confetti".into()
+                        } else {
+                            "Off".into()
+                        },
+                    ),
                     Field::Bell => (
-                        "Sound",
+                        "Terminal bell",
                         if s.bell {
                             "On · at transitions".into()
                         } else {
@@ -1201,12 +1274,12 @@ fn ui(f: &mut Frame, app: &mut App) {
             Constraint::Length(2),
             Constraint::Length(2),
             Constraint::Length(2),
-            Constraint::Length(2),
+            Constraint::Length(3),
         ])
         .margin(1)
         .split(area);
         let color = if paused {
-            Color::Rgb(74, 86, 101)
+            Color::Rgb(135, 146, 160)
         } else if app.clock.phase == Phase::Rest {
             Color::Rgb(125, 194, 245)
         } else {
@@ -1271,13 +1344,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                 centered(rows[3], area.width.saturating_sub(8).min(90), 1),
             );
         }
-        let hint = if app.clock.phase == Phase::Done {
-            "Enter restart   Esc settings   q quit"
-        } else if area.width < 90 {
-            "Space pause   r restart   Esc settings\nh/l or −/+ zoom   a auto-fit   q quit"
-        } else {
-            "Space pause   r restart   Esc settings   h/l or −/+ zoom   a auto-fit   q quit"
-        };
+        let hint = running_hint(area.width, app.clock.phase, paused);
         f.render_widget(Paragraph::new(hint).centered().style(muted), rows[4]);
     }
     if app.presets {
@@ -1440,13 +1507,20 @@ fn run() -> Result<(), String> {
     let mut terminal = ratatui::init();
     let result = (|| -> io::Result<()> {
         loop {
-            if app.clock.tick(&app.config.settings, Instant::now()) && app.config.settings.bell {
+            let frame_time = Instant::now();
+            let transitioned = app.advance(frame_time);
+            let animate = app.animating(frame_time);
+            if transitioned && app.config.settings.bell {
                 print!("\x07");
                 io::stdout().flush()?;
             }
             terminal.draw(|f| ui(f, &mut app))?;
-            if event::poll(Duration::from_millis(33))?
-                && let Event::Key(key) = event::read()?
+            // Static screens block for input/resize; active timing and confetti
+            // keep a bounded animation cadence. A resize wakes event::read too.
+            if animate && !event::poll(Duration::from_millis(33))? {
+                continue;
+            }
+            if let Event::Key(key) = event::read()?
                 && key.kind == KeyEventKind::Press
             {
                 if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -1792,5 +1866,92 @@ mod tests {
                 terminal.draw(|f| ui(f, &mut app)).unwrap();
             }
         }
+    }
+    #[test]
+    fn confetti_only_on_final_completion_then_returns_to_static() {
+        let mut app = App::new(Config::default(), PathBuf::new());
+        app.config.settings.pomodoro = true;
+        app.config.settings.confetti = true;
+        app.config.settings.prep = 0;
+        app.config.settings.work_seconds = 1;
+        app.config.settings.rest_seconds = 1;
+        app.config.settings.cycles = 2;
+        let start = Instant::now();
+        app.clock.start(&app.config.settings, start);
+        for seconds in 1..4 {
+            app.advance(start + Duration::from_secs(seconds));
+            assert!(app.celebration.is_none());
+        }
+        app.advance(start + Duration::from_secs(4));
+        assert_eq!(app.clock.phase, Phase::Done);
+        assert!(app.animating(start + Duration::from_secs(4)));
+        app.advance(start + Duration::from_secs(9));
+        assert!(!app.animating(start + Duration::from_secs(9)));
+        assert!(app.celebration.is_none());
+        app.key(KeyCode::Char('c'));
+        assert!(app.celebration.is_some());
+        app.key(KeyCode::Char(' '));
+        assert!(app.celebration.is_none());
+        app.key(KeyCode::Char('c'));
+        app.key(KeyCode::Esc);
+        app.advance(start + Duration::from_secs(10));
+        assert!(app.celebration.is_none());
+        assert!(!app.animating(start + Duration::from_secs(10)));
+    }
+    #[test]
+    fn all_themes_parse_and_confetti_clips_and_expires() {
+        for theme in THEMES {
+            let mut config = Config::default();
+            args(
+                &mut config,
+                &["--theme".into(), theme.name.into(), "--confetti".into()],
+            )
+            .unwrap();
+            assert!(config.settings.confetti);
+            assert_eq!(THEMES[config.settings.theme].name, theme.name);
+        }
+        for (w, h) in [(0, 0), (1, 1), (36, 14), (100, 30)] {
+            let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+            terminal
+                .draw(|f| {
+                    effects::confetti(f, f.area(), Duration::from_millis(1500), THEMES[0].accent)
+                })
+                .unwrap();
+            terminal
+                .draw(|f| effects::confetti(f, f.area(), CONFETTI_DURATION, THEMES[0].accent))
+                .unwrap();
+            assert!(
+                terminal
+                    .backend()
+                    .buffer()
+                    .content
+                    .iter()
+                    .all(|cell| cell.symbol() == " ")
+            );
+        }
+    }
+    #[test]
+    fn footer_fits_smallest_terminal_and_describes_actual_action() {
+        for phase in [Phase::Running, Phase::Prep, Phase::Rest, Phase::Done] {
+            for paused in [true, false] {
+                let hint = running_hint(36, phase, paused);
+                assert!(hint.lines().all(|line| line.chars().count() <= 34));
+                assert!(hint.contains("q quit"));
+                assert!(hint.contains("Esc settings"));
+                if phase != Phase::Done && paused {
+                    assert!(hint.contains("Space resume"));
+                }
+            }
+        }
+    }
+    #[test]
+    fn quitting_keeps_save_errors_visible() {
+        let blocker =
+            std::env::temp_dir().join(format!("tui-timer-save-blocker-{}", std::process::id()));
+        std::fs::write(&blocker, "file, not directory").unwrap();
+        let mut app = App::new(Config::default(), blocker.join("config.toml"));
+        assert!(!app.key(KeyCode::Char('q')));
+        assert!(app.message.starts_with("Couldn't save"));
+        std::fs::remove_file(blocker).unwrap();
     }
 }

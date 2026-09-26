@@ -16,7 +16,8 @@ OPTIONS
   --no-countdown                    Start immediately
   --size auto|1–8                   Digit scale, clamped to terminal
   --font block|slim|dots             Digit style
-  --theme mint|amber|ice|mono        Accent color
+  --theme NAME                      Accent theme (see names below)
+  --confetti / --no-confetti         Optional five-second completion effect
   --bell / --no-bell                Terminal bell at transitions/finish
   --preset NAME                     Start a saved preset
   --list                            List presets
@@ -34,6 +35,10 @@ RUNNING
   -/+ or h/l zoom; a restores auto-fit. Shrinking stops at size 1.
   Pomodoro shows work/rest, cycle number, and total session time left.
   Each cycle includes a rest, including the final cycle.
+  After completion: c replays confetti; Space dismisses it.
+
+THEMES
+  mint, amber, ice, mono, lavender, rose, coral, ocean, lime, sand
 
 Settings: OS config directory (TUI_TIMER_CONFIG overrides the file).
 Durations: 120, 2m, 1m30s, 2:00. Get ready: 0–3600 seconds.

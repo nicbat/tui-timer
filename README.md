@@ -25,6 +25,7 @@ tui-timer --stopwatch --no-countdown
 tui-timer --pomodoro --work 25m --rest 5m --cycles 4
 tui-timer --hang --timer 3m --font slim --theme amber
 tui-timer --preset hang --size 2
+tui-timer --timer 2m --confetti --theme lavender
 tui-timer --list
 tui-timer --help
 ```
@@ -90,13 +91,27 @@ updates an existing named preset. Loading another preset replaces unsaved edits.
 ## Running and zoom
 
 **Space** pauses/resumes. Paused digits dim, with a prominent **||** badge and
-“Space to resume” hint. **r** restarts, **Esc** opens setup, and **q** quits.
+“Space to resume” hint. **r** restarts, **Esc** opens setup and resets the current session, and **q** quits.
 **Ctrl+C** exits anywhere and restores the terminal.
 
 **-/+** or **h/l** shrinks/grows the digits. From auto-fit, zoom starts at the
 currently visible size. Shrinking stops at 1; growing stops at what fits. Neither
 wraps around. **a** explicitly restores auto-fit. The same behavior applies to
 size changes in setup, where the preview determines the available space.
+
+## Completion confetti and themes
+
+![Completion confetti in the Lavender theme](docs/confetti.png)
+
+Set **Finish effect → Confetti** in setup, or launch with `--confetti`.
+The optional five-second burst runs after the timer or final Pomodoro rest finishes;
+it never interrupts intermediate work/rest transitions. It is off by default.
+At completion, **c** replays it and **Space** dismisses it. `--no-confetti` disables
+automatic celebration. Both choices are remembered with settings and presets.
+Digits and controls remain in front of the effect; there is no flashing.
+
+Themes: **Mint, Amber, Ice, Mono, Lavender, Rose, Coral, Ocean, Lime, Sand**.
+Use the Color setting or `--theme lavender` (lowercase theme names).
 
 ## Configuration
 
@@ -118,7 +133,10 @@ continue to load; omitted new fields get defaults. Fields:
 - `prep`: 0–3600 seconds of get-ready countdown, separate from the timer. Zero is off.
   The one-hour limit applies only to this optional countdown, not to work or rest.
 - `font`: 0 Block, 1 Slim, 2 Dots. `size`: 0 auto-fit or 1–8.
-- `theme`: 0 Mint, 1 Amber, 2 Ice, 3 Mono. `bell`: terminal bell at transitions/finish.
+- `theme`: 0 Mint, 1 Amber, 2 Ice, 3 Mono, 4 Lavender, 5 Rose, 6 Coral,
+  7 Ocean, 8 Lime, 9 Sand. Existing indexes stay compatible.
+- `confetti`: optional completion animation (defaults to false).
+- `bell`: terminal bell at transitions/finish; sound depends on terminal preferences.
 
 Durations are 1–359999 seconds. Preset names start with a lowercase letter and use
 lowercase letters, digits, or hyphens, up to 32 characters. CLI option names are
@@ -138,3 +156,11 @@ navigation, countdown, pause/resume, Pomodoro cycles, stopwatch, fonts, resize, 
 terminal-mode restoration. It saves screenshots in `target/qa/` and measures
 launch-to-first-frame. Unit tests cover monotonic timing, delayed frames, total
 session time, zoom boundaries, configuration compatibility, and parsing.
+
+## Review notes
+
+[Performance review](docs/performance-review.md) records measured startup/CPU and
+optimization decisions. [UX research and backlog](docs/ux-review.md) records the
+agent's sourced findings, implemented fixes, and larger ideas deferred for discussion.
+Static screens now wait for keyboard/resize events instead of redrawing continuously;
+running clocks and confetti retain a bounded animation cadence.

@@ -31,6 +31,7 @@ class Terminal:
         self.screen = pyte.Screen(100, 30)
         self.stream = pyte.Stream(self.screen)
         self.decoder = codecs.getincrementaldecoder('utf-8')()
+        self.bytes_received = 0
         self.started = time.perf_counter()
         self.process = subprocess.Popen([str(BINARY), *args], stdin=slave, stdout=slave, stderr=slave,
             env={**{k: v for k, v in os.environ.items() if k != 'NO_COLOR'}, 'TERM': 'xterm-256color', 'COLORTERM': 'truecolor', 'TUI_TIMER_CONFIG': str(config)})
@@ -40,14 +41,19 @@ class Terminal:
         while time.monotonic() < deadline:
             if select.select([self.master], [], [], max(0, deadline-time.monotonic()))[0]:
                 data = os.read(self.master, 65536)
+                self.bytes_received += len(data)
                 self.stream.feed(self.decoder.decode(data))
         return '\n'.join(self.screen.display)
 
     def expect(self, value, timeout=3):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if value in self.read(.015):
+            if value in '\n'.join(self.screen.display):
                 return
+            if select.select([self.master], [], [], max(0, deadline-time.monotonic()))[0]:
+                data = os.read(self.master, 65536)
+                self.bytes_received += len(data)
+                self.stream.feed(self.decoder.decode(data))
         raise AssertionError(f'Missing {value!r}:\n' + '\n'.join(self.screen.display))
 
     def send(self, keys):
@@ -199,11 +205,47 @@ with tempfile.TemporaryDirectory() as temp:
     terminal.capture('stopwatch')
     terminal.close()
 
+    terminal = Terminal(config, '--timer', '1s', '--no-countdown', '--confetti', '--theme', 'lavender')
+    terminal.expect('Complete')
+    terminal.read(1.5)
+    terminal.capture('confetti')
+    terminal.read(4)
+    settled = terminal.bytes_received
+    terminal.read(.5)
+    assert terminal.bytes_received == settled, 'Completed confetti kept redrawing'
+    terminal.send('c')
+    terminal.read(.2)
+    assert terminal.bytes_received > settled
+    terminal.send(' ')
+    settled = terminal.bytes_received
+    terminal.read(.3)
+    assert terminal.bytes_received == settled, 'Dismissed confetti kept redrawing'
+    terminal.close()
+
+    for state in ['setup', 'paused']:
+        terminal = Terminal(config, *(['--timer', '2m', '--no-countdown'] if state == 'paused' else []))
+        terminal.read(.2)
+        if state == 'paused': terminal.send(' ')
+        fcntl.ioctl(terminal.slave, termios.TIOCSWINSZ, struct.pack('HHHH', 120, 400, 0, 0))
+        os.kill(terminal.process.pid, signal.SIGWINCH)
+        terminal.read(.3)
+        settled = terminal.bytes_received
+        def ticks():
+            fields = Path(f'/proc/{terminal.process.pid}/stat').read_text().split()
+            return int(fields[13]) + int(fields[14])
+        start_ticks = ticks()
+        terminal.read(3)
+        cpu = (ticks()-start_ticks)/os.sysconf('SC_CLK_TCK')/3*100
+        assert terminal.bytes_received == settled, f'{state} kept redrawing'
+        print(f'400x120 {state}: {cpu:.2f}% CPU, zero idle output over 3s')
+        terminal.send('\x1b')
+        terminal.close()
+
     timings = []
     for _ in range(10):
         terminal = Terminal(config)
         terminal.expect('T I M E R')
         timings.append((time.perf_counter()-terminal.started)*1000)
         terminal.close()
-    print(f'PTY flows passed. First setup frame median: {statistics.median(timings):.1f}ms (15ms polling resolution).')
+    print(f'PTY flows passed. First setup frame median: {statistics.median(timings):.1f}ms (immediate PTY readiness).')
     print(f'Screenshots: {OUT}')
