@@ -1,0 +1,40 @@
+tui-timer — a little room for one thing
+
+USAGE
+  tui-timer                         Open remembered setup
+  tui-timer --hang                   Start a saved preset
+  tui-timer --timer 2m               Start a timer
+  tui-timer --stopwatch              Start a stopwatch
+  tui-timer --pomodoro --work 25m --rest 5m --cycles 4
+
+OPTIONS
+  --work DURATION                   Pomodoro work period (default 25m)
+  --rest DURATION                   Pomodoro rest period (default 5m)
+  --cycles 1–99                     Work/rest pairs (default 4)
+  --countdown 5s                    Get ready once before starting
+  --no-countdown                    Start immediately
+  --size auto|1–8                   Digit scale, clamped to terminal
+  --font block|slim|dots             Digit style
+  --theme mint|amber|ice|mono        Accent color
+  --bell / --no-bell                Terminal bell at transitions/finish
+  --preset NAME                     Start a saved preset
+  --list                            List presets
+  --config                          Print config path
+  --version                         Print version
+
+SETUP
+  Arrows / h j k l navigate and change; e / i type a duration.
+  Enter starts. p opens presets; s saves edits; n saves a new preset.
+  Presets: Enter / e edit, r rename, d delete, n new, Esc back.
+  g / G selects the first / last setting or preset.
+
+RUNNING
+  Space pauses/resumes; r restarts; Esc returns to setup; q quits.
+  -/+ or h/l zoom; a restores auto-fit. Shrinking stops at size 1.
+  Pomodoro shows work/rest, cycle number, and total session time left.
+  Each cycle includes a rest, including the final cycle.
+
+Settings: OS config directory (TUI_TIMER_CONFIG overrides the file).
+Durations: 120, 2m, 1m30s, 2:00. Get ready: 0–3600 seconds.
+Omitted options inherit remembered settings or the selected preset.
+Use your terminal's fullscreen shortcut; the digits resize automatically.

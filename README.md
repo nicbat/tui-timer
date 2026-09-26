@@ -1,7 +1,10 @@
 # tui-timer
 
-A small, keyboard-driven timer and stopwatch. Large responsive digits, a preparation
-countdown, visible controls, and named presets. Written in Rust with Ratatui.
+A small, keyboard-driven timer, stopwatch, and Pomodoro app. Large responsive
+digits, visible controls, a live font preview, and editable named presets.
+Written in Rust with Ratatui; one native executable with no runtime downloads.
+
+![Pomodoro setup with live digit preview](docs/settings.png)
 
 ## Run
 
@@ -10,78 +13,103 @@ cargo run --release
 cargo run --release -- --hang
 ```
 
-For instant launches after compiling, run `./target/release/tui-timer` directly.
-To install on your PATH:
-
-```sh
-cargo install --path . --locked
-tui-timer --hang
-```
-
-Cargo installs into `~/.cargo/bin`; add that directory to PATH if needed.
-Use your terminal emulator's fullscreen shortcut; digits resize automatically.
-
-## Command line
+After building, run `./target/release/tui-timer` directly for fast startup.
+Install with `cargo install --path . --locked` (installs in `~/.cargo/bin`).
+Use your terminal's fullscreen shortcut; the digits resize automatically.
 
 ```sh
 tui-timer                            # remembered setup screen
-tui-timer --hang                      # 5s preparation, then a full 2 minutes
+tui-timer --hang                      # saved hang preset
 tui-timer --timer 2m --countdown 5s
 tui-timer --stopwatch --no-countdown
-tui-timer --hang --timer 3m --theme amber
+tui-timer --pomodoro --work 25m --rest 5m --cycles 4
+tui-timer --hang --timer 3m --font slim --theme amber
 tui-timer --preset hang --size 2
 tui-timer --list
-tui-timer --config
 tui-timer --help
 ```
 
-Durations accept seconds (`120`), units (`1m30s`, `2h`), or clock notation (`2:00`).
-Any run options launch immediately. Explicit options override preset values;
-otherwise omitted options inherit your remembered settings. The preparation time
-is separate from the timer duration. Stopwatch mode also supports preparation.
-The optional terminal bell depends on your terminal's bell settings; it's off by default.
-On completion, the timer holds at zero until you restart or leave.
+Any run options launch immediately. Omitted options inherit remembered settings
+or the selected preset. Explicit options override preset settings. Durations accept
+seconds (`120`), units (`1m30s`, `2h`), or clock notation (`2:00`).
 
-## Controls and editable presets
+## Pomodoro
 
-Setup shows the controls at all times:
+Choose **Pomodoro** under Mode, then set work duration, rest duration, and cycles.
+Defaults are 25 minutes of work, 5 minutes of rest, and 4 cycles. Each cycle includes
+both work and rest, including the final rest. The app transitions automatically,
+then holds at zero after the final rest. An enabled bell sounds at transitions.
 
-- **Up/Down or Tab:** select a setting; **Left/Right:** change it.
-- **e:** type the selected duration or preparation time; Enter applies it.
-- **Enter:** start; **q:** quit.
-- **p:** save current settings as a named preset, e.g. `hang-long`.
-- **l:** load a preset using arrows and Enter.
+The large countdown shows the current period. Beneath it: Work/Rest, current cycle
+out of total cycles, and total session time remaining. Rest uses an ice-blue accent.
+The optional get-ready countdown runs once before the first work period and is
+included in the total time remaining while preparing. Pause freezes all timing.
+Restart starts the entire sequence again, including preparation.
 
-To customize a preset, load it with **l**, change its settings, then press **p**.
-The existing name is prefilled: **Enter** updates it, or edit the name to save a copy.
-Loading or running a preset does not overwrite its stored settings automatically.
-Changes are saved to the preset only with **p**. Saving an existing name replaces it.
-Every named preset is available as `--NAME` on your next launch.
+## Setup and preview
 
-While running: **Space** pauses/resumes, **r** restarts including preparation,
-**Esc** returns to settings, **+/-** adjusts size (zero means automatic), **q** quits.
-After `--hang`, press Esc to edit that preset and p to save it.
+- **j/k** or **Up/Down**, **Tab/Shift+Tab**: select a setting.
+- **h/l** or **Left/Right**: change it. **g/G**: first/last setting.
+- **e/i**: type the selected duration or cycle count. Typing replaces the selected
+  value; Backspace clears it, Enter saves, Esc cancels.
+- **Enter**: start. **q**: quit.
+- **p**: open the preset manager. **s**: save edits to the loaded preset.
+- **n**: save current settings as a new preset.
+
+The bottom of setup previews the current time, digit style, size, and accent.
+Digit fonts are **Block**, **Slim**, and **Dots**. These are built-in large-digit
+styles; the terminal controls the font used for ordinary interface text.
+
+## Presets
+
+Press **p** to open the manager:
+
+- **j/k** or **Up/Down** selects a preset; **g/G** jumps to the first/last.
+- **Enter/e** edits its settings. Change any field and press **s** to save directly.
+- **r** renames it. Type the new name and press Enter; existing names are protected.
+- **d** deletes it after **y** confirmation; **n/Esc** cancels deletion.
+- **n** creates a preset from the current setup. **Esc** closes the manager.
+
+Every preset is available as `--NAME` or `--preset NAME`. After launching a preset,
+Esc returns to its settings; s saves edits without a naming prompt. A title marker
+shows unsaved changes. Starting or quitting remembers the setup but only **s**
+updates an existing named preset. Loading another preset replaces unsaved edits.
+
+## Running and zoom
+
+**Space** pauses/resumes. Paused digits dim, with a prominent **||** badge and
+“Space to resume” hint. **r** restarts, **Esc** opens setup, and **q** quits.
 **Ctrl+C** exits anywhere and restores the terminal.
+
+**-/+** or **h/l** shrinks/grows the digits. From auto-fit, zoom starts at the
+currently visible size. Shrinking stops at 1; growing stops at what fits. Neither
+wraps around. **a** explicitly restores auto-fit. The same behavior applies to
+size changes in setup, where the preview determines the available space.
 
 ## Configuration
 
-Linux: `~/.config/tui-timer/config.toml` (honors `XDG_CONFIG_HOME`).
-On other platforms, the OS's standard user config directory is used.
-The file is created when starting, saving, or quitting the app. `--config` prints its path.
-For isolated development or testing:
+Linux: `~/.config/tui-timer/config.toml` (honors `XDG_CONFIG_HOME`). Other platforms
+use their OS user config directory. `--config` prints the exact path. The file is
+created when starting, saving, or quitting. For isolated development:
 
 ```sh
 TUI_TIMER_CONFIG=/tmp/my-timer.toml ./target/release/tui-timer
 ```
 
-The TOML file contains `[settings]` and `[presets.hang]` sections with:
-`stopwatch`, `seconds`, `prep`, `size`, `theme`, and `bell`.
-Size: 0 (auto) or 1–8. Themes: 0 mint, 1 amber, 2 ice, 3 monochrome.
-Timer: 1–359999 seconds; preparation: 0–3600 seconds.
-Preset names start with a lowercase letter and contain lowercase letters, digits,
-or hyphens, up to 32 characters; built-in CLI option names are reserved.
-Edit or remove preset sections directly while the app is closed if desired.
-Invalid configuration is reported rather than silently replaced.
+The TOML file has `[settings]` and `[presets.NAME]` sections. Existing configurations
+continue to load; omitted new fields get defaults. Fields:
+
+- `stopwatch`, `pomodoro`: booleans; both false means timer, only one can be true.
+- `seconds`: timer duration; `work_seconds`, `rest_seconds`: Pomodoro durations.
+- `cycles`: 1–99 work/rest pairs.
+- `prep`: 0–3600 seconds of get-ready countdown, separate from the timer. Zero is off.
+  The one-hour limit applies only to this optional countdown, not to work or rest.
+- `font`: 0 Block, 1 Slim, 2 Dots. `size`: 0 auto-fit or 1–8.
+- `theme`: 0 Mint, 1 Amber, 2 Ice, 3 Mono. `bell`: terminal bell at transitions/finish.
+
+Durations are 1–359999 seconds. Preset names start with a lowercase letter and use
+lowercase letters, digits, or hyphens, up to 32 characters. CLI option names are
+reserved. Invalid configuration is reported instead of silently replaced.
 
 ## Development
 
@@ -89,16 +117,11 @@ Invalid configuration is reported rather than silently replaced.
 cargo test
 cargo clippy --all-targets -- -D warnings
 cargo build --release --locked
-```
-
-Timing uses a monotonic clock rather than counting render frames. Pauses preserve
-fractional seconds; delayed frames carry elapsed preparation time into the timer.
-The application is a single executable with no runtime downloads or network calls.
-
-A Linux PTY integration test exercises preset editing, countdown, pause/resume,
-completion, restart, stopwatch, resizing, and terminal-mode restoration. It also
-captures terminal screenshots in `target/qa/` and measures launch-to-first-frame:
-
-```sh
 uv run --with pyte --with pillow scripts/test_terminal.py
 ```
+
+The Linux PTY integration test exercises preset create/edit/rename/delete, Vim
+navigation, countdown, pause/resume, Pomodoro cycles, stopwatch, fonts, resize, and
+terminal-mode restoration. It saves screenshots in `target/qa/` and measures
+launch-to-first-frame. Unit tests cover monotonic timing, delayed frames, total
+session time, zoom boundaries, configuration compatibility, and parsing.

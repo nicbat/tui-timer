@@ -12,7 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 struct Settings {
     stopwatch: bool,
@@ -21,6 +21,11 @@ struct Settings {
     size: u16,
     theme: usize,
     bell: bool,
+    pomodoro: bool,
+    work_seconds: u64,
+    rest_seconds: u64,
+    cycles: u16,
+    font: usize,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -31,6 +36,11 @@ impl Default for Settings {
             size: 0,
             theme: 0,
             bell: false,
+            pomodoro: false,
+            work_seconds: 1500,
+            rest_seconds: 300,
+            cycles: 4,
+            font: 0,
         }
     }
 }
@@ -74,8 +84,20 @@ fn load(path: &PathBuf) -> Result<Config, String> {
     Ok(config)
 }
 fn validate(s: &mut Settings) -> Result<(), String> {
-    if s.seconds == 0 || s.seconds > 359999 || s.prep > 3600 || s.size > 8 || s.theme > 3 {
-        return Err("Config values out of range: timer 1s–99h59m59s, preparation 0–3600s, size 0–8, theme 0–3".into());
+    if s.seconds == 0
+        || s.seconds > 359999
+        || s.prep > 3600
+        || s.size > 8
+        || s.theme > 3
+        || s.work_seconds == 0
+        || s.work_seconds > 359999
+        || s.rest_seconds == 0
+        || s.rest_seconds > 359999
+        || !(1..=99).contains(&s.cycles)
+        || s.font > 2
+        || (s.stopwatch && s.pomodoro)
+    {
+        return Err("Config values out of range: durations 1s–99h59m59s, get ready 0–3600s, cycles 1–99, size 0–8, theme 0–3, font 0–2; choose one mode".into());
     }
     Ok(())
 }
@@ -153,6 +175,11 @@ fn valid_name(name: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
         && name.as_bytes()[0].is_ascii_lowercase()
         && ![
+            "pomodoro",
+            "work",
+            "rest",
+            "cycles",
+            "font",
             "timer",
             "stopwatch",
             "countdown",
@@ -180,13 +207,14 @@ fn args(config: &mut Config, argv: &[String]) -> Result<bool, String> {
                 i += 1;
                 preset = Some(argv.get(i).ok_or("--preset needs a name")?.clone());
             }
-            "--timer" | "--countdown" | "--size" | "--theme" => {
+            "--timer" | "--countdown" | "--size" | "--theme" | "--work" | "--rest" | "--cycles"
+            | "--font" => {
                 i += 1;
                 if i >= argv.len() {
                     return Err(format!("{a} needs a value"));
                 }
             }
-            "--stopwatch" | "--bell" | "--no-bell" | "--no-countdown" => {}
+            "--pomodoro" | "--stopwatch" | "--bell" | "--no-bell" | "--no-countdown" => {}
             _ if a.starts_with("--") && config.presets.contains_key(&a[2..]) => {
                 preset = Some(a[2..].into())
             }
@@ -208,8 +236,35 @@ fn args(config: &mut Config, argv: &[String]) -> Result<bool, String> {
                 i += 1;
                 config.settings.seconds = duration(&argv[i])?;
                 config.settings.stopwatch = false;
+                config.settings.pomodoro = false;
             }
-            "--stopwatch" => config.settings.stopwatch = true,
+            "--stopwatch" => {
+                config.settings.stopwatch = true;
+                config.settings.pomodoro = false;
+            }
+            "--pomodoro" => {
+                config.settings.pomodoro = true;
+                config.settings.stopwatch = false;
+            }
+            "--work" => {
+                i += 1;
+                config.settings.work_seconds = duration(&argv[i])?;
+            }
+            "--rest" => {
+                i += 1;
+                config.settings.rest_seconds = duration(&argv[i])?;
+            }
+            "--cycles" => {
+                i += 1;
+                config.settings.cycles = argv[i].parse().map_err(|_| "Cycles must be 1–99")?;
+            }
+            "--font" => {
+                i += 1;
+                config.settings.font = ["block", "slim", "dots"]
+                    .iter()
+                    .position(|font| *font == argv[i])
+                    .ok_or("Font must be block, slim, or dots")?;
+            }
             "--countdown" => {
                 i += 1;
                 config.settings.prep = duration(&argv[i])?;
@@ -241,11 +296,44 @@ fn args(config: &mut Config, argv: &[String]) -> Result<bool, String> {
     Ok(!argv.is_empty())
 }
 
+impl Settings {
+    fn mode_name(&self) -> &'static str {
+        if self.pomodoro {
+            "Pomodoro"
+        } else if self.stopwatch {
+            "Stopwatch"
+        } else {
+            "Timer"
+        }
+    }
+    fn duration(&self) -> u64 {
+        if self.pomodoro {
+            self.work_seconds
+        } else {
+            self.seconds
+        }
+    }
+    fn summary(&self) -> String {
+        if self.pomodoro {
+            format!(
+                "{} work / {} rest × {}",
+                display_time(self.work_seconds),
+                display_time(self.rest_seconds),
+                self.cycles
+            )
+        } else if self.stopwatch {
+            "count up".into()
+        } else {
+            display_time(self.seconds)
+        }
+    }
+}
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Phase {
     Setup,
     Prep,
     Running,
+    Rest,
     Done,
 }
 struct Clock {
@@ -253,6 +341,7 @@ struct Clock {
     elapsed: Duration,
     anchor: Instant,
     paused: bool,
+    cycle: u16,
 }
 impl Clock {
     fn new() -> Self {
@@ -261,17 +350,17 @@ impl Clock {
             elapsed: Duration::ZERO,
             anchor: Instant::now(),
             paused: false,
+            cycle: 1,
         }
     }
     fn start(&mut self, s: &Settings, now: Instant) {
+        *self = Self::new();
         self.phase = if s.prep > 0 {
             Phase::Prep
         } else {
             Phase::Running
         };
-        self.elapsed = Duration::ZERO;
         self.anchor = now;
-        self.paused = false;
     }
     fn elapsed_at(&self, now: Instant) -> Duration {
         self.elapsed
@@ -286,39 +375,122 @@ impl Clock {
         self.anchor = now;
         self.paused = !self.paused;
     }
+    fn limit(&self, s: &Settings) -> u64 {
+        match self.phase {
+            Phase::Prep => s.prep,
+            Phase::Rest => s.rest_seconds,
+            _ => s.duration(),
+        }
+    }
     fn tick(&mut self, s: &Settings, now: Instant) -> bool {
-        if self.paused {
+        if self.paused || matches!(self.phase, Phase::Setup | Phase::Done) {
             return false;
         }
-        if self.phase == Phase::Prep && self.elapsed_at(now) >= Duration::from_secs(s.prep) {
-            self.elapsed = self.elapsed_at(now) - Duration::from_secs(s.prep);
+        let mut transitioned = false;
+        loop {
+            if self.phase == Phase::Running && s.stopwatch {
+                break;
+            }
+            let limit = Duration::from_secs(self.limit(s));
+            let elapsed = self.elapsed_at(now);
+            if elapsed < limit {
+                break;
+            }
+            self.elapsed = elapsed - limit;
             self.anchor = now;
-            self.phase = Phase::Running;
+            match self.phase {
+                Phase::Prep => self.phase = Phase::Running,
+                Phase::Running if s.pomodoro => {
+                    self.phase = Phase::Rest;
+                    transitioned = true;
+                }
+                Phase::Rest if self.cycle < s.cycles => {
+                    self.cycle += 1;
+                    self.phase = Phase::Running;
+                    transitioned = true;
+                }
+                _ => {
+                    self.phase = Phase::Done;
+                    self.elapsed = limit;
+                    self.paused = true;
+                    return true;
+                }
+            }
         }
-        if self.phase == Phase::Running
-            && !s.stopwatch
-            && self.elapsed_at(now) >= Duration::from_secs(s.seconds)
-        {
-            self.phase = Phase::Done;
-            self.elapsed = Duration::from_secs(s.seconds);
-            self.paused = true;
-            return true;
-        }
-        false
+        transitioned
     }
+}
+#[derive(Clone, Copy, PartialEq)]
+enum Field {
+    Mode,
+    Duration,
+    Rest,
+    Cycles,
+    Prep,
+    Font,
+    Size,
+    Theme,
+    Bell,
+}
+#[derive(Clone)]
+enum Edit {
+    Duration(Field),
+    NewPreset,
+    Rename(String),
+}
+struct Input {
+    kind: Edit,
+    value: String,
+    fresh: bool,
 }
 struct App {
     config: Config,
     path: PathBuf,
     clock: Clock,
     selected: usize,
-    input: Option<(bool, String)>,
+    input: Option<Input>,
     message: String,
     presets: bool,
     preset_index: usize,
     preset_name: Option<String>,
+    delete: Option<String>,
+    rendered_scale: u16,
+    max_scale: u16,
 }
 impl App {
+    fn new(config: Config, path: PathBuf) -> Self {
+        Self {
+            config,
+            path,
+            clock: Clock::new(),
+            selected: 0,
+            input: None,
+            message: String::new(),
+            presets: false,
+            preset_index: 0,
+            preset_name: None,
+            delete: None,
+            rendered_scale: 1,
+            max_scale: 8,
+        }
+    }
+    fn fields(&self) -> Vec<Field> {
+        let mut fields = vec![Field::Mode];
+        if !self.config.settings.stopwatch {
+            fields.push(Field::Duration);
+        }
+        if self.config.settings.pomodoro {
+            fields.extend([Field::Rest, Field::Cycles]);
+        }
+        fields.extend([
+            Field::Prep,
+            Field::Font,
+            Field::Size,
+            Field::Theme,
+            Field::Bell,
+        ]);
+        fields
+    }
     fn persist(&mut self) -> bool {
         match save(&self.path, &self.config) {
             Ok(()) => true,
@@ -328,70 +500,197 @@ impl App {
             }
         }
     }
-    fn key(&mut self, key: KeyCode) -> bool {
-        if let Some((naming, mut value)) = self.input.take() {
-            match key {
-                KeyCode::Esc => return false,
-                KeyCode::Enter => {
-                    if naming {
-                        if !valid_name(&value) {
-                            self.message = "Use a–z, 0–9, hyphens; start with a letter. Reserved names unavailable.".into();
-                        } else {
-                            self.config
-                                .presets
-                                .insert(value.clone(), self.config.settings.clone());
-                            if self.persist() {
-                                self.preset_name = Some(value.clone());
-                                self.message = format!("Saved. Launch with tui-timer --{value}");
-                            }
-                            return false;
-                        }
+    fn selected_preset(&self) -> Option<String> {
+        self.config.presets.keys().nth(self.preset_index).cloned()
+    }
+    fn save_preset(&mut self) {
+        if let Some(name) = self.preset_name.clone() {
+            self.config
+                .presets
+                .insert(name.clone(), self.config.settings.clone());
+            if self.persist() {
+                self.message = format!("Saved --{name}");
+            }
+        } else {
+            self.input = Some(Input {
+                kind: Edit::NewPreset,
+                value: String::new(),
+                fresh: true,
+            });
+        }
+    }
+    fn zoom(&mut self, plus: bool) {
+        let current = if self.config.settings.size == 0 {
+            self.rendered_scale
+        } else {
+            self.config.settings.size.min(self.max_scale)
+        }
+        .max(1);
+        self.config.settings.size = if plus {
+            (current + 1).min(self.max_scale.max(1))
+        } else {
+            current.saturating_sub(1).max(1)
+        };
+    }
+    fn edit_key(&mut self, key: KeyCode, mut input: Input) {
+        match key {
+            KeyCode::Esc => {
+                self.message.clear();
+                return;
+            }
+            KeyCode::Enter => match &input.kind {
+                Edit::Duration(field) => {
+                    let parsed = if *field == Field::Cycles {
+                        input
+                            .value
+                            .parse::<u64>()
+                            .map_err(|_| "Cycles must be 1–99".into())
                     } else {
-                        match duration(&value) {
-                            Ok(n)
-                                if (self.selected == 1 && n > 0)
-                                    || (self.selected == 2 && n <= 3600) =>
-                            {
-                                if self.selected == 1 {
-                                    self.config.settings.seconds = n;
-                                } else {
-                                    self.config.settings.prep = n;
-                                }
-                                self.message.clear();
-                                return false;
+                        duration(&input.value)
+                    };
+                    match parsed {
+                        Ok(n)
+                            if match field {
+                                Field::Prep => n <= 3600,
+                                Field::Cycles => (1..=99).contains(&n),
+                                _ => n > 0,
+                            } =>
+                        {
+                            let s = &mut self.config.settings;
+                            match field {
+                                Field::Prep => s.prep = n,
+                                Field::Rest => s.rest_seconds = n,
+                                Field::Cycles => s.cycles = n as u16,
+                                _ if s.pomodoro => s.work_seconds = n,
+                                _ => s.seconds = n,
                             }
-                            _ => {
-                                self.message =
-                                    "Enter a valid duration (timer > 0; preparation ≤ 1h).".into()
+                            self.message.clear();
+                            return;
+                        }
+                        _ => {
+                            self.message = match field {
+                                Field::Prep => {
+                                    "Get-ready countdown: 0 (off) to 3600 seconds.".into()
+                                }
+                                Field::Cycles => "Choose 1–99 work/rest cycles.".into(),
+                                _ => "Use a duration such as 2m or 1:30, greater than zero.".into(),
                             }
                         }
                     }
                 }
-                KeyCode::Backspace => {
-                    value.pop();
+                Edit::NewPreset | Edit::Rename(_) => {
+                    let name = &input.value;
+                    let same = matches!(&input.kind, Edit::Rename(old) if old == name);
+                    if !valid_name(name) {
+                        self.message =
+                            "Name: start with a–z; use a–z, 0–9, hyphens (max 32).".into();
+                    } else if self.config.presets.contains_key(name) && !same {
+                        self.message = "That name already exists. Choose another name.".into();
+                    } else {
+                        let settings = match &input.kind {
+                            Edit::Rename(old) => self.config.presets.remove(old).unwrap(),
+                            _ => self.config.settings.clone(),
+                        };
+                        self.config.presets.insert(name.clone(), settings);
+                        if matches!(&input.kind, Edit::NewPreset)
+                            || matches!(&input.kind, Edit::Rename(old) if self.preset_name.as_ref() == Some(old))
+                        {
+                            self.preset_name = Some(name.clone());
+                        }
+                        self.preset_index = self
+                            .config
+                            .presets
+                            .keys()
+                            .position(|n| n == name)
+                            .unwrap_or(0);
+                        if self.persist() {
+                            self.message = format!("Saved --{name}");
+                        }
+                        return;
+                    }
                 }
-                KeyCode::Char(c) if value.len() < 32 => value.push(c),
-                _ => {}
+            },
+            KeyCode::Backspace => {
+                if input.fresh {
+                    input.value.clear();
+                } else {
+                    input.value.pop();
+                }
+                input.fresh = false;
             }
-            self.input = Some((naming, value));
+            KeyCode::Char(c) if input.fresh || input.value.len() < 32 => {
+                if input.fresh {
+                    input.value.clear();
+                }
+                input.value.push(c);
+                input.fresh = false;
+            }
+            _ => {}
+        }
+        self.input = Some(input);
+    }
+    fn key(&mut self, key: KeyCode) -> bool {
+        if let Some(input) = self.input.take() {
+            self.edit_key(key, input);
+            return false;
+        }
+        if let Some(name) = self.delete.take() {
+            match key {
+                KeyCode::Char('y') => {
+                    self.config.presets.remove(&name);
+                    if self.preset_name.as_ref() == Some(&name) {
+                        self.preset_name = None;
+                    }
+                    self.preset_index = self
+                        .preset_index
+                        .min(self.config.presets.len().saturating_sub(1));
+                    if self.persist() {
+                        self.message = format!("Deleted --{name}");
+                    }
+                }
+                KeyCode::Esc | KeyCode::Char('n') => {}
+                _ => self.delete = Some(name),
+            }
             return false;
         }
         if self.presets {
-            let len = self.config.presets.len();
+            let len = self.config.presets.len().max(1);
             match key {
-                KeyCode::Esc | KeyCode::Char('l') => self.presets = false,
-                KeyCode::Down => self.preset_index = (self.preset_index + 1) % len.max(1),
-                KeyCode::Up => {
-                    self.preset_index = (self.preset_index + len.max(1) - 1) % len.max(1)
+                KeyCode::Esc | KeyCode::Char('p') | KeyCode::Char('q') => self.presets = false,
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.preset_index = (self.preset_index + 1) % len
                 }
-                KeyCode::Enter => {
-                    if let Some((name, s)) = self.config.presets.iter().nth(self.preset_index) {
-                        self.config.settings = s.clone();
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.preset_index = (self.preset_index + len - 1) % len
+                }
+                KeyCode::Char('g') => self.preset_index = 0,
+                KeyCode::Char('G') => self.preset_index = len - 1,
+                KeyCode::Enter | KeyCode::Char('e') | KeyCode::Char('l') => {
+                    if let Some(name) = self.selected_preset() {
+                        self.config.settings = self.config.presets[&name].clone();
                         self.preset_name = Some(name.clone());
-                        self.message = format!("Editing --{name} · p saves changes · Enter starts");
+                        self.selected = 0;
+                        self.presets = false;
+                        self.message = format!("Editing --{name} · s saves changes");
                     }
-                    self.presets = false;
                 }
+                KeyCode::Char('n') => {
+                    self.input = Some(Input {
+                        kind: Edit::NewPreset,
+                        value: String::new(),
+                        fresh: true,
+                    });
+                }
+                KeyCode::Char('r') => {
+                    if let Some(name) = self.selected_preset() {
+                        self.input = Some(Input {
+                            kind: Edit::Rename(name.clone()),
+                            value: name,
+                            fresh: true,
+                        });
+                    }
+                }
+                KeyCode::Char('d') => self.delete = self.selected_preset(),
                 _ => {}
             }
             return false;
@@ -401,44 +700,94 @@ impl App {
             return true;
         }
         if self.clock.phase == Phase::Setup {
+            let fields = self.fields();
+            let field = fields[self.selected.min(fields.len() - 1)];
             match key {
-                KeyCode::Down | KeyCode::Tab => self.selected = (self.selected + 1) % 6,
-                KeyCode::Up | KeyCode::BackTab => self.selected = (self.selected + 5) % 6,
-                KeyCode::Left | KeyCode::Right => {
-                    let plus = key == KeyCode::Right;
+                KeyCode::Down | KeyCode::Tab | KeyCode::Char('j') => {
+                    self.selected = (self.selected + 1) % fields.len()
+                }
+                KeyCode::Up | KeyCode::BackTab | KeyCode::Char('k') => {
+                    self.selected = (self.selected + fields.len() - 1) % fields.len()
+                }
+                KeyCode::Char('g') => self.selected = 0,
+                KeyCode::Char('G') => self.selected = fields.len() - 1,
+                KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l') => {
+                    let plus = matches!(key, KeyCode::Right | KeyCode::Char('l'));
                     let s = &mut self.config.settings;
-                    match self.selected {
-                        0 => s.stopwatch = !s.stopwatch,
-                        1 => {
-                            s.seconds = if plus {
-                                (s.seconds + 15).min(359999)
-                            } else {
-                                s.seconds.saturating_sub(15).max(1)
-                            }
+                    let adjust = |v: u64, step: u64, min: u64, max: u64| {
+                        if plus {
+                            (v + step).min(max)
+                        } else {
+                            v.saturating_sub(step).max(min)
                         }
-                        2 => {
-                            s.prep = if plus {
-                                (s.prep + 1).min(3600)
+                    };
+                    match field {
+                        Field::Mode => {
+                            let mode = if s.pomodoro {
+                                2
+                            } else if s.stopwatch {
+                                1
                             } else {
-                                s.prep.saturating_sub(1)
-                            }
+                                0
+                            };
+                            let mode = (mode + if plus { 1 } else { 2 }) % 3;
+                            s.stopwatch = mode == 1;
+                            s.pomodoro = mode == 2;
                         }
-                        3 => s.size = (s.size + if plus { 1 } else { 8 }) % 9,
-                        4 => s.theme = (s.theme + if plus { 1 } else { 3 }) % 4,
-                        5 => s.bell = !s.bell,
-                        _ => {}
+                        Field::Duration if s.pomodoro => {
+                            s.work_seconds = adjust(s.work_seconds, 60, 1, 359999)
+                        }
+                        Field::Duration => s.seconds = adjust(s.seconds, 15, 1, 359999),
+                        Field::Rest => s.rest_seconds = adjust(s.rest_seconds, 60, 1, 359999),
+                        Field::Cycles => s.cycles = adjust(s.cycles as u64, 1, 1, 99) as u16,
+                        Field::Prep => s.prep = adjust(s.prep, 1, 0, 3600),
+                        Field::Font => s.font = (s.font + if plus { 1 } else { 2 }) % 3,
+                        Field::Size => self.zoom(plus),
+                        Field::Theme => s.theme = (s.theme + if plus { 1 } else { 3 }) % 4,
+                        Field::Bell => s.bell = !s.bell,
                     }
                 }
-                KeyCode::Char('e') if self.selected == 1 || self.selected == 2 => {
-                    self.input = Some((false, String::new()))
-                }
-                KeyCode::Char('p') => {
+                KeyCode::Char('e') | KeyCode::Char('i')
+                    if matches!(
+                        field,
+                        Field::Duration | Field::Prep | Field::Rest | Field::Cycles
+                    ) =>
+                {
+                    let s = &self.config.settings;
+                    let n = match field {
+                        Field::Prep => s.prep,
+                        Field::Rest => s.rest_seconds,
+                        Field::Cycles => s.cycles as u64,
+                        _ => s.duration(),
+                    };
+                    self.input = Some(Input {
+                        kind: Edit::Duration(field),
+                        value: if field == Field::Cycles {
+                            n.to_string()
+                        } else {
+                            display_time(n)
+                        },
+                        fresh: true,
+                    });
                     self.message.clear();
-                    self.input = Some((true, self.preset_name.clone().unwrap_or_default()));
                 }
-                KeyCode::Char('l') => {
+                KeyCode::Char('a') => self.config.settings.size = 0,
+                KeyCode::Char('p') => {
                     self.presets = true;
-                    self.preset_index = 0;
+                    self.message.clear();
+                    self.preset_index = self
+                        .preset_name
+                        .as_ref()
+                        .and_then(|name| self.config.presets.keys().position(|n| n == name))
+                        .unwrap_or(0);
+                }
+                KeyCode::Char('s') => self.save_preset(),
+                KeyCode::Char('n') => {
+                    self.input = Some(Input {
+                        kind: Edit::NewPreset,
+                        value: String::new(),
+                        fresh: true,
+                    })
                 }
                 KeyCode::Enter => {
                     self.message.clear();
@@ -453,27 +802,25 @@ impl App {
                 KeyCode::Char(' ') if self.clock.phase != Phase::Done => {
                     self.clock.toggle(Instant::now())
                 }
-                KeyCode::Char('r') | KeyCode::Enter
-                    if self.clock.phase == Phase::Done || key == KeyCode::Char('r') =>
-                {
+                KeyCode::Char('r') => self.clock.start(&self.config.settings, Instant::now()),
+                KeyCode::Enter if self.clock.phase == Phase::Done => {
                     self.clock.start(&self.config.settings, Instant::now())
                 }
                 KeyCode::Esc => {
                     self.clock = Clock::new();
+                    self.selected = 0;
                     self.message.clear();
                 }
-                KeyCode::Char('+') | KeyCode::Char('=') => {
-                    self.config.settings.size = (self.config.settings.size + 1).min(8)
-                }
-                KeyCode::Char('-') => {
-                    self.config.settings.size = self.config.settings.size.saturating_sub(1)
-                }
+                KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Char('l') => self.zoom(true),
+                KeyCode::Char('-') | KeyCode::Char('h') => self.zoom(false),
+                KeyCode::Char('a') => self.config.settings.size = 0,
                 _ => {}
             }
         }
         false
     }
 }
+
 const DIGITS: [[&str; 5]; 11] = [
     ["111", "101", "101", "101", "111"],
     ["010", "110", "010", "010", "111"],
@@ -499,13 +846,67 @@ fn display_time(seconds: u64) -> String {
         format!("{:02}:{:02}", seconds / 60, seconds % 60)
     }
 }
-fn big_digits(f: &mut Frame, area: Rect, text: &str, requested: u16, color: Color) {
-    let patterns: Vec<_> = text
+const SLIM: [[&str; 7]; 11] = [
+    [
+        "01110", "10001", "10001", "10001", "10001", "10001", "01110",
+    ],
+    [
+        "00100", "01100", "00100", "00100", "00100", "00100", "01110",
+    ],
+    [
+        "01110", "10001", "00001", "00010", "00100", "01000", "11111",
+    ],
+    [
+        "11110", "00001", "00001", "01110", "00001", "00001", "11110",
+    ],
+    [
+        "00010", "00110", "01010", "10010", "11111", "00010", "00010",
+    ],
+    [
+        "11111", "10000", "10000", "11110", "00001", "00001", "11110",
+    ],
+    [
+        "01110", "10000", "10000", "11110", "10001", "10001", "01110",
+    ],
+    [
+        "11111", "00001", "00010", "00100", "01000", "01000", "01000",
+    ],
+    [
+        "01110", "10001", "10001", "01110", "10001", "10001", "01110",
+    ],
+    [
+        "01110", "10001", "10001", "01111", "00001", "00001", "01110",
+    ],
+    ["0", "0", "1", "0", "1", "0", "0"],
+];
+fn digit_fit(area: Rect, text: &str, font: usize) -> u16 {
+    let units: u16 = text
         .chars()
-        .map(|c| &DIGITS[c.to_digit(10).map(|n| n as usize).unwrap_or(10)])
-        .collect();
-    let units = patterns.iter().map(|p| p[0].len() as u16).sum::<u16>() + patterns.len() as u16 - 1;
-    let fit = (area.width / (units * 2)).min(area.height / 5).min(8);
+        .map(|c| {
+            if c == ':' {
+                1
+            } else if font == 1 {
+                5
+            } else {
+                3
+            }
+        })
+        .sum::<u16>()
+        + text.len() as u16
+        - 1;
+    (area.width / (units * 2))
+        .min(area.height / if font == 1 { 7 } else { 5 })
+        .min(8)
+}
+fn big_digits(
+    f: &mut Frame,
+    area: Rect,
+    text: &str,
+    requested: u16,
+    font: usize,
+    color: Color,
+) -> (u16, u16) {
+    let fit = digit_fit(area, text, font);
     if fit == 0 {
         f.render_widget(
             Paragraph::new(text)
@@ -517,21 +918,38 @@ fn big_digits(f: &mut Frame, area: Rect, text: &str, requested: u16, color: Colo
                 ..area
             },
         );
-        return;
+        return (1, 1);
     }
     let scale = if requested == 0 {
         fit
     } else {
         requested.min(fit)
     };
+    let height = if font == 1 { 7 } else { 5 };
     let mut lines = Vec::new();
-    for row in 0..5 {
-        let line = patterns
-            .iter()
-            .map(|p| {
-                p[row]
+    for row in 0..height {
+        let line = text
+            .chars()
+            .map(|c| {
+                let index = c.to_digit(10).map(|n| n as usize).unwrap_or(10);
+                let pattern = if font == 1 {
+                    SLIM[index][row]
+                } else {
+                    DIGITS[index][row]
+                };
+                pattern
                     .chars()
-                    .map(|c| if c == '1' { "█" } else { " " }.repeat((scale * 2) as usize))
+                    .map(|c| {
+                        if c == '1' {
+                            if font == 2 {
+                                "● ".repeat(scale as usize)
+                            } else {
+                                "█".repeat((scale * 2) as usize)
+                            }
+                        } else {
+                            " ".repeat((scale * 2) as usize)
+                        }
+                    })
                     .collect::<String>()
             })
             .collect::<Vec<_>>()
@@ -543,11 +961,12 @@ fn big_digits(f: &mut Frame, area: Rect, text: &str, requested: u16, color: Colo
     f.render_widget(
         Paragraph::new(lines).centered().style(color),
         Rect {
-            y: area.y + (area.height - 5 * scale) / 2,
-            height: 5 * scale,
+            y: area.y + (area.height - height as u16 * scale) / 2,
+            height: height as u16 * scale,
             ..area
         },
     );
+    (scale, fit)
 }
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
     let w = width.min(area.width);
@@ -559,7 +978,25 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
         h,
     )
 }
-fn ui(f: &mut Frame, app: &App) {
+fn session_remaining(clock: &Clock, s: &Settings, now: Instant) -> u64 {
+    if clock.phase == Phase::Done {
+        return 0;
+    }
+    let current = Duration::from_secs(clock.limit(s))
+        .saturating_sub(clock.elapsed_at(now))
+        .as_secs_f64()
+        .ceil() as u64;
+    let future = match clock.phase {
+        Phase::Prep => s.cycles as u64 * (s.work_seconds + s.rest_seconds),
+        Phase::Running => {
+            s.rest_seconds + (s.cycles - clock.cycle) as u64 * (s.work_seconds + s.rest_seconds)
+        }
+        Phase::Rest => (s.cycles - clock.cycle) as u64 * (s.work_seconds + s.rest_seconds),
+        _ => 0,
+    };
+    current + future
+}
+fn ui(f: &mut Frame, app: &mut App) {
     let area = f.area();
     let s = &app.config.settings;
     let accent = [
@@ -570,19 +1007,20 @@ fn ui(f: &mut Frame, app: &App) {
     ][s.theme];
     let muted = Color::Rgb(135, 146, 160);
     let bg = Color::Rgb(15, 19, 25);
+    let amber = Color::Rgb(245, 192, 106);
     f.render_widget(
         Block::default().style(Style::default().bg(bg).fg(Color::Rgb(222, 229, 237))),
         area,
     );
-    let (min_width, min_height) = if app.clock.phase == Phase::Setup {
-        (60, 18)
+    let (min_w, min_h) = if app.clock.phase == Phase::Setup {
+        (60, 24)
     } else {
-        (36, 12)
+        (36, 14)
     };
-    if area.width < min_width || area.height < min_height {
+    if area.width < min_w || area.height < min_h {
         f.render_widget(
             Paragraph::new(format!(
-                "Enlarge terminal to {min_width} × {min_height}\nq quit · Esc settings"
+                "Enlarge terminal to {min_w} × {min_h}\nq quit · Esc settings"
             ))
             .centered(),
             centered(area, area.width, 2),
@@ -590,231 +1028,310 @@ fn ui(f: &mut Frame, app: &App) {
         return;
     }
     if app.clock.phase == Phase::Setup {
-        let panel = centered(area, 60, 22);
+        let panel = centered(area, 72, area.height.saturating_sub(2));
+        let fields = app.fields();
         let rows = Layout::vertical([
             Constraint::Length(2),
-            Constraint::Length(2),
-            Constraint::Length(8),
-            Constraint::Length(2),
-            Constraint::Min(1),
+            Constraint::Length(fields.len() as u16),
+            Constraint::Min(5),
+            Constraint::Length(3),
+            Constraint::Length(1),
         ])
         .split(panel);
+        let title = app
+            .preset_name
+            .as_ref()
+            .map(|name| {
+                let dirty = app.config.presets.get(name) != Some(s);
+                format!("--{name}{}", if dirty { " · unsaved edits" } else { "" })
+            })
+            .unwrap_or_else(|| "T I M E R".into());
         f.render_widget(
-            Paragraph::new("T I M E R")
+            Paragraph::new(title)
                 .centered()
                 .style(Style::default().fg(accent).bold()),
             rows[0],
         );
-        f.render_widget(
-            Paragraph::new(
-                app.preset_name
-                    .as_ref()
-                    .map(|name| format!("Preset: --{name} · p to save edits"))
-                    .unwrap_or_else(|| "Make a little room for one thing.".into()),
-            )
-            .centered()
-            .style(muted),
-            rows[1],
-        );
-        let values = [
-            if s.stopwatch {
-                "Stopwatch".into()
-            } else {
-                "Timer".into()
-            },
-            display_time(s.seconds),
-            if s.prep == 0 {
-                "Off".into()
-            } else {
-                format!("{} seconds", s.prep)
-            },
-            if s.size == 0 {
-                "Auto · fill terminal".into()
-            } else {
-                format!("{} (clamped to fit)", s.size)
-            },
-            ["Mint", "Amber", "Ice", "Mono"][s.theme].into(),
-            if s.bell {
-                "On · terminal bell".into()
-            } else {
-                "Off".into()
-            },
-        ];
-        let labels = [
-            "Mode",
-            "Duration",
-            "Get ready",
-            "Digit size",
-            "Color",
-            "Finish sound",
-        ];
-        let lines: Vec<Line> = labels
+        let lines = fields
             .iter()
             .enumerate()
-            .map(|(i, label)| {
+            .map(|(i, field)| {
+                let (label, value) = match field {
+                    Field::Mode => ("Mode", s.mode_name().into()),
+                    Field::Duration => (
+                        if s.pomodoro {
+                            "Work duration"
+                        } else {
+                            "Duration"
+                        },
+                        display_time(s.duration()),
+                    ),
+                    Field::Rest => ("Rest duration", display_time(s.rest_seconds)),
+                    Field::Cycles => ("Cycles", format!("{} · work + rest each", s.cycles)),
+                    Field::Prep => (
+                        "Get ready",
+                        if s.prep == 0 {
+                            "Off".into()
+                        } else {
+                            format!("{}s before starting", s.prep)
+                        },
+                    ),
+                    Field::Font => ("Digit font", ["Block", "Slim", "Dots"][s.font].into()),
+                    Field::Size => (
+                        "Digit size",
+                        if s.size == 0 {
+                            "Auto-fit".into()
+                        } else {
+                            format!("{} · a restores auto-fit", s.size)
+                        },
+                    ),
+                    Field::Theme => ("Color", ["Mint", "Amber", "Ice", "Mono"][s.theme].into()),
+                    Field::Bell => (
+                        "Sound",
+                        if s.bell {
+                            "On · at transitions".into()
+                        } else {
+                            "Off".into()
+                        },
+                    ),
+                };
                 Line::from(format!(
-                    " {}  {:<15} {}",
-                    if app.selected == i { "›" } else { " " },
-                    label,
-                    values[i]
+                    "  {}  {label:<17} {value}",
+                    if i == app.selected { "›" } else { " " }
                 ))
-                .style(if app.selected == i {
+                .style(if i == app.selected {
                     Style::default().fg(accent).bold()
                 } else {
                     Style::default().fg(muted)
                 })
             })
-            .collect();
-        f.render_widget(Paragraph::new(lines), rows[2]);
+            .collect::<Vec<_>>();
+        f.render_widget(Paragraph::new(lines), rows[1]);
+        let preview = if s.stopwatch {
+            "00:00".into()
+        } else {
+            display_time(s.duration())
+        };
+        let (scale, fit) = big_digits(f, rows[2], &preview, s.size, s.font, accent);
+        app.rendered_scale = scale;
+        app.max_scale = fit;
+        f.render_widget(Paragraph::new("↑↓ / j k select   ←→ / h l change   e / i type\nEnter start   p presets   s save edits   n new preset\na auto-fit   q quit").centered().style(muted),rows[3]);
         f.render_widget(
-            Paragraph::new("[ Enter to start ]")
+            Paragraph::new(app.message.as_str())
                 .centered()
                 .style(accent),
-            rows[3],
-        );
-        f.render_widget(
-            Paragraph::new(
-                "↑↓ select   ←→ change   e type duration\np save preset   l load preset   q quit",
-            )
-            .centered()
-            .style(muted),
             rows[4],
         );
     } else {
         let now = Instant::now();
         let elapsed = app.clock.elapsed_at(now);
-        let (label, value) = match app.clock.phase {
-            Phase::Prep => (
-                "GET READY",
-                Duration::from_secs(s.prep)
-                    .saturating_sub(elapsed)
-                    .as_secs_f64()
-                    .ceil() as u64,
-            ),
-            Phase::Done => ("COMPLETE", 0),
-            _ if s.stopwatch => ("STOPWATCH", elapsed.as_secs()),
-            _ => (
-                "TIME REMAINING",
-                Duration::from_secs(s.seconds)
-                    .saturating_sub(elapsed)
-                    .as_secs_f64()
-                    .ceil() as u64,
-            ),
+        let paused = app.clock.paused && app.clock.phase != Phase::Done;
+        let value = if app.clock.phase == Phase::Done {
+            0
+        } else if s.stopwatch && app.clock.phase == Phase::Running {
+            elapsed.as_secs()
+        } else {
+            Duration::from_secs(app.clock.limit(s))
+                .saturating_sub(elapsed)
+                .as_secs_f64()
+                .ceil() as u64
         };
-        let rows = Layout::vertical([
-            Constraint::Length(3),
-            Constraint::Min(5),
-            Constraint::Length(2),
-            Constraint::Length(2),
-        ])
-        .margin(1)
-        .split(area);
-        f.render_widget(
-            Paragraph::new(if app.clock.paused && app.clock.phase != Phase::Done {
-                "P A U S E D"
-            } else {
-                label
-            })
-            .centered()
-            .style(accent),
-            rows[0],
-        );
         let text = if app.clock.phase == Phase::Prep {
             value.to_string()
         } else {
             display_time(value)
         };
-        big_digits(f, rows[1], &text, s.size, accent);
+        let rows = Layout::vertical([
+            Constraint::Min(5),
+            Constraint::Length(2),
+            Constraint::Length(2),
+            Constraint::Length(2),
+            Constraint::Length(2),
+        ])
+        .margin(1)
+        .split(area);
+        let color = if paused {
+            Color::Rgb(74, 86, 101)
+        } else if app.clock.phase == Phase::Rest {
+            Color::Rgb(125, 194, 245)
+        } else {
+            accent
+        };
+        let (scale, fit) = big_digits(f, rows[0], &text, s.size, s.font, color);
+        app.rendered_scale = scale;
+        app.max_scale = fit;
+        let status = if paused {
+            "  ||   Space to resume  ".to_string()
+        } else if app.clock.phase == Phase::Prep {
+            "Get ready".into()
+        } else if app.clock.phase == Phase::Done {
+            "Complete".into()
+        } else {
+            String::new()
+        };
+        let badge = centered(rows[1], status.chars().count() as u16, 1);
+        f.render_widget(
+            Paragraph::new(status).centered().style(if paused {
+                Style::default().bg(amber).fg(bg).bold()
+            } else {
+                Style::default().fg(accent)
+            }),
+            badge,
+        );
+        if s.pomodoro {
+            let stage = match app.clock.phase {
+                Phase::Rest => "Rest",
+                Phase::Prep => "Ready",
+                Phase::Done => "Finished",
+                _ => "Work",
+            };
+            let info = if area.width < 68 {
+                format!(
+                    "{stage} · {}/{}\n{} total left",
+                    app.clock.cycle,
+                    s.cycles,
+                    display_time(session_remaining(&app.clock, s, now))
+                )
+            } else {
+                format!(
+                    "{stage} · cycle {} of {} · {} total left",
+                    app.clock.cycle,
+                    s.cycles,
+                    display_time(session_remaining(&app.clock, s, now))
+                )
+            };
+            f.render_widget(Paragraph::new(info).centered().style(muted), rows[2]);
+        }
         if !s.stopwatch && app.clock.phase != Phase::Prep {
-            let bar = centered(rows[2], area.width.saturating_sub(8).min(90), 1);
+            let ratio = if app.clock.phase == Phase::Done {
+                1.0
+            } else {
+                (elapsed.as_secs_f64() / app.clock.limit(s) as f64).clamp(0.0, 1.0)
+            };
             f.render_widget(
                 Gauge::default()
-                    .ratio((elapsed.as_secs_f64() / s.seconds as f64).clamp(0.0, 1.0))
-                    .gauge_style(Style::default().fg(accent).bg(Color::Rgb(34, 43, 53)))
+                    .ratio(ratio)
+                    .gauge_style(Style::default().fg(color).bg(Color::Rgb(34, 43, 53)))
                     .label(""),
-                bar,
+                centered(rows[3], area.width.saturating_sub(8).min(90), 1),
             );
         }
-        f.render_widget(
-            Paragraph::new(if app.clock.phase == Phase::Done {
-                "Enter restart   Esc settings   q quit"
-            } else {
-                if area.width < 68 {
-                    "Space pause   r restart   q quit\nEsc settings   +/− size"
-                } else {
-                    "Space pause/resume   r restart   Esc settings   +/− size   q quit"
-                }
-            })
-            .centered()
-            .style(muted),
-            rows[3],
-        );
-    }
-    if !app.message.is_empty() {
-        f.render_widget(
-            Paragraph::new(app.message.as_str())
-                .centered()
-                .style(accent),
-            Rect::new(area.x, area.bottom() - 1, area.width, 1),
-        );
-    }
-    if let Some((naming, value)) = &app.input {
-        let popup = centered(area, 58, 7);
-        f.render_widget(Clear, popup);
-        f.render_widget(
-            Paragraph::new(format!(
-                "\n {value}▏\n\n Enter save · Esc cancel{}",
-                if *naming {
-                    " · existing name replaces"
-                } else {
-                    " · e.g. 2m or 1:30"
-                }
-            ))
-            .block(Block::default().borders(Borders::ALL).title(if *naming {
-                " Save named preset "
-            } else {
-                " Type duration "
-            }))
-            .style(Style::default().bg(bg).fg(accent)),
-            popup,
-        );
+        let hint = if app.clock.phase == Phase::Done {
+            "Enter restart   Esc settings   q quit"
+        } else if area.width < 90 {
+            "Space pause   r restart   Esc settings\nh/l or −/+ zoom   a auto-fit   q quit"
+        } else {
+            "Space pause   r restart   Esc settings   h/l or −/+ zoom   a auto-fit   q quit"
+        };
+        f.render_widget(Paragraph::new(hint).centered().style(muted), rows[4]);
     }
     if app.presets {
-        let popup = centered(
-            area,
-            58,
-            (app.config.presets.len() as u16 + 4).min(area.height),
-        );
+        let popup = centered(area, 68, 18);
         f.render_widget(Clear, popup);
-        let capacity = popup.height.saturating_sub(3) as usize;
+        f.render_widget(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Presets ")
+                .style(Style::default().bg(bg).fg(accent)),
+            popup,
+        );
+        let inner = popup.inner(Margin::new(2, 1));
+        let rows = Layout::vertical([
+            Constraint::Length(2),
+            Constraint::Min(3),
+            Constraint::Length(3),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+        f.render_widget(
+            Paragraph::new("Select a preset to edit its settings.").style(muted),
+            rows[0],
+        );
+        let capacity = rows[1].height as usize;
         let offset = app.preset_index.saturating_sub(capacity.saturating_sub(1));
         let lines = app
             .config
             .presets
-            .keys()
+            .iter()
             .enumerate()
             .skip(offset)
             .take(capacity)
-            .map(|(i, n)| {
+            .map(|(i, (name, s))| {
                 Line::from(format!(
-                    " {} --{n}",
-                    if i == app.preset_index { "›" } else { " " }
+                    "{} --{name}   {}",
+                    if i == app.preset_index { "›" } else { " " },
+                    s.summary()
                 ))
-                .style(if i == app.preset_index { accent } else { muted })
+                .style(if i == app.preset_index {
+                    Style::default().fg(accent).bold()
+                } else {
+                    Style::default().fg(muted)
+                })
             })
             .collect::<Vec<_>>();
         f.render_widget(
-            Paragraph::new(lines)
+            Paragraph::new(if lines.is_empty() {
+                vec![Line::from(
+                    "No presets yet. Press n to save the current setup.",
+                )]
+            } else {
+                lines
+            }),
+            rows[1],
+        );
+        f.render_widget(Paragraph::new("j/k or ↑↓ select   Enter / e edit   r rename\nn new from current setup   d delete\nEsc back").style(muted),rows[2]);
+        f.render_widget(Paragraph::new(app.message.as_str()).style(accent), rows[3]);
+    }
+    if let Some(input) = &app.input {
+        let popup = centered(area, 58, 8);
+        f.render_widget(Clear, popup);
+        let title = match &input.kind {
+            Edit::NewPreset => " New preset ",
+            Edit::Rename(_) => " Rename preset ",
+            Edit::Duration(Field::Cycles) => " Number of cycles ",
+            Edit::Duration(Field::Prep) => " Get-ready countdown · 0 turns it off ",
+            _ => " Duration · e.g. 25m or 1:30 ",
+        };
+        f.render_widget(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .style(Style::default().bg(bg).fg(accent)),
+            popup,
+        );
+        let inner = popup.inner(Margin::new(2, 1));
+        let text = Line::from(input.value.clone()).style(if input.fresh {
+            Style::default().bg(accent).fg(bg)
+        } else {
+            Style::default().fg(accent)
+        });
+        f.render_widget(
+            Paragraph::new(vec![
+                text,
+                Line::from(""),
+                Line::from("Enter save · Esc cancel · typing replaces selection"),
+                Line::from(app.message.clone()),
+            ]),
+            inner,
+        );
+    }
+    if let Some(name) = &app.delete {
+        let popup = centered(area, 58, 6);
+        f.render_widget(Clear, popup);
+        f.render_widget(
+            Paragraph::new(format!("\nDelete --{name}?\n\ny delete · n / Esc cancel"))
+                .centered()
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title(" Presets · ↑↓ select · Enter load · Esc close "),
+                        .title(" Delete preset "),
                 )
-                .style(Style::default().bg(bg)),
+                .style(Style::default().bg(bg).fg(amber)),
             popup,
         );
     }
 }
+
 fn main() {
     if let Err(e) = run() {
         eprintln!("tui-timer: {e}");
@@ -824,9 +1341,7 @@ fn main() {
 fn run() -> Result<(), String> {
     let argv: Vec<String> = env::args().skip(1).collect();
     if argv.iter().any(|s| s == "--help" || s == "-h") {
-        println!(
-            "tui-timer — a little room for one thing\n\nUSAGE\n  tui-timer                     Open remembered setup\n  tui-timer --timer 2m           Start a timer\n  tui-timer --hang               Start a saved preset\n  tui-timer --stopwatch          Start a stopwatch\n\nOPTIONS\n  --countdown 5s                 Preparation before timing\n  --no-countdown                 Start immediately\n  --size auto|1–8                Digit size (always clamped to fit)\n  --theme mint|amber|ice|mono     Accent color\n  --bell / --no-bell             Terminal bell at completion\n  --preset NAME                 Start a saved preset\n  --list                        List presets\n  --config                      Print config path\n  --version                     Print version\n\nIn setup: arrows change settings, e types a duration, p saves a named\npreset (available as --NAME), l loads one, Enter starts.\nWhile running: Space pauses, r restarts, Esc opens setup, q quits.\nSettings live in your OS config directory; TUI_TIMER_CONFIG overrides\nthe file path. Use your terminal's fullscreen shortcut for fullscreen."
-        );
+        print!("{}", include_str!("../help.txt"));
         return Ok(());
     }
     if argv == ["--version"] {
@@ -843,8 +1358,8 @@ fn run() -> Result<(), String> {
         for (name, s) in &config.presets {
             println!(
                 "--{name:<18} {} · {} · {}s preparation",
-                if s.stopwatch { "stopwatch" } else { "timer" },
-                display_time(s.seconds),
+                s.mode_name(),
+                s.summary(),
                 s.prep
             );
         }
@@ -854,17 +1369,7 @@ fn run() -> Result<(), String> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return Err("Run in an interactive terminal (or use --help).".into());
     }
-    let mut app = App {
-        config,
-        path,
-        clock: Clock::new(),
-        selected: 0,
-        input: None,
-        message: String::new(),
-        presets: false,
-        preset_index: 0,
-        preset_name: None,
-    };
+    let mut app = App::new(config, path);
     app.preset_name = argv.iter().rev().find_map(|arg| {
         arg.strip_prefix("--")
             .filter(|name| app.config.presets.contains_key(*name))
@@ -884,7 +1389,7 @@ fn run() -> Result<(), String> {
                 print!("\x07");
                 io::stdout().flush()?;
             }
-            terminal.draw(|f| ui(f, &app))?;
+            terminal.draw(|f| ui(f, &mut app))?;
             if event::poll(Duration::from_millis(33))?
                 && let Event::Key(key) = event::read()?
                 && key.kind == KeyEventKind::Press
@@ -988,21 +1493,143 @@ mod tests {
         for (w, h) in [(20, 8), (36, 12), (80, 24), (160, 48), (300, 100)] {
             let backend = ratatui::backend::TestBackend::new(w, h);
             let mut terminal = Terminal::new(backend).unwrap();
-            let mut app = App {
-                config: Config::default(),
-                path: PathBuf::new(),
-                clock: Clock::new(),
-                selected: 0,
-                input: None,
-                message: String::new(),
-                presets: false,
-                preset_index: 0,
-                preset_name: None,
-            };
+            let mut app = App::new(Config::default(), PathBuf::new());
             for phase in [Phase::Setup, Phase::Prep, Phase::Running, Phase::Done] {
                 app.clock.phase = phase;
-                terminal.draw(|f| ui(f, &app)).unwrap();
+                terminal.draw(|f| ui(f, &mut app)).unwrap();
             }
+        }
+    }
+    #[test]
+    fn pomodoro_cycles_include_each_rest_and_account_for_delayed_frames() {
+        let settings = Settings {
+            pomodoro: true,
+            work_seconds: 10,
+            rest_seconds: 3,
+            cycles: 2,
+            prep: 2,
+            ..Settings::default()
+        };
+        let start = Instant::now();
+        let mut clock = Clock::new();
+        clock.start(&settings, start);
+        assert_eq!(session_remaining(&clock, &settings, start), 28);
+        assert!(!clock.tick(&settings, start + Duration::from_secs(2)));
+        assert_eq!(clock.phase, Phase::Running);
+        assert!(clock.tick(&settings, start + Duration::from_secs(12)));
+        assert_eq!(clock.phase, Phase::Rest);
+        assert_eq!(
+            session_remaining(&clock, &settings, start + Duration::from_secs(12)),
+            16
+        );
+        clock.toggle(start + Duration::from_secs(13));
+        assert!(!clock.tick(&settings, start + Duration::from_secs(50)));
+        assert_eq!(
+            session_remaining(&clock, &settings, start + Duration::from_secs(50)),
+            15
+        );
+        clock.toggle(start + Duration::from_secs(50));
+        assert!(clock.tick(&settings, start + Duration::from_secs(53)));
+        assert_eq!((clock.phase, clock.cycle), (Phase::Running, 2));
+        assert_eq!(
+            clock.elapsed_at(start + Duration::from_secs(53)),
+            Duration::from_secs(1)
+        );
+        assert!(clock.tick(&settings, start + Duration::from_secs(65)));
+        assert_eq!(clock.phase, Phase::Done);
+        assert_eq!(
+            session_remaining(&clock, &settings, start + Duration::from_secs(65)),
+            0
+        );
+        clock.start(&settings, start);
+        assert!(clock.tick(&settings, start + Duration::from_secs(100)));
+        assert_eq!((clock.phase, clock.cycle), (Phase::Done, 2));
+    }
+    #[test]
+    fn zoom_clamps_without_returning_to_auto() {
+        let mut app = App::new(Config::default(), PathBuf::new());
+        app.rendered_scale = 3;
+        app.max_scale = 3;
+        app.zoom(false);
+        assert_eq!(app.config.settings.size, 2);
+        for _ in 0..20 {
+            app.zoom(false);
+        }
+        assert_eq!(app.config.settings.size, 1);
+        app.zoom(true);
+        assert_eq!(app.config.settings.size, 2);
+        for _ in 0..20 {
+            app.zoom(true);
+        }
+        assert_eq!(app.config.settings.size, 3);
+        app.config.settings.size = 8;
+        app.max_scale = 2;
+        app.zoom(false);
+        assert_eq!(app.config.settings.size, 1);
+        app.key(KeyCode::Char('a'));
+        assert_eq!(app.config.settings.size, 0);
+    }
+    #[test]
+    fn old_settings_get_new_defaults_and_cli_validates_pomodoro() {
+        let legacy: Config =
+            toml::from_str("[settings]\nseconds = 60\n[presets.hang]\nseconds = 90").unwrap();
+        assert_eq!(legacy.settings.work_seconds, 1500);
+        assert_eq!(legacy.presets["hang"].seconds, 90);
+        let mut config = Config::default();
+        let argv = [
+            "--pomodoro",
+            "--work",
+            "15m",
+            "--rest",
+            "3m",
+            "--cycles",
+            "2",
+            "--font",
+            "slim",
+        ]
+        .map(String::from);
+        args(&mut config, &argv).unwrap();
+        assert!(config.settings.pomodoro);
+        assert_eq!(config.settings.work_seconds, 900);
+        assert_eq!(config.settings.rest_seconds, 180);
+        assert_eq!(config.settings.cycles, 2);
+        assert_eq!(config.settings.font, 1);
+        for argv in [
+            vec!["--cycles", "0"],
+            vec!["--rest", "0"],
+            vec!["--font", "unknown"],
+        ] {
+            assert!(
+                args(
+                    &mut Config::default(),
+                    &argv.into_iter().map(String::from).collect::<Vec<_>>()
+                )
+                .is_err()
+            );
+        }
+    }
+    #[test]
+    fn pause_is_symbol_only_and_every_font_renders() {
+        for font in 0..3 {
+            let mut app = App::new(Config::default(), PathBuf::new());
+            app.config.settings.font = font;
+            app.config.settings.prep = 0;
+            app.clock.start(&app.config.settings, Instant::now());
+            app.clock.toggle(Instant::now());
+            let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+            terminal.draw(|f| ui(f, &mut app)).unwrap();
+            let content = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            assert!(content.contains("||"));
+            assert!(content.contains("Space to resume"));
+            assert!(!content.contains("PAUSED"));
+            assert!(!content.contains("TIME REMAINING"));
+            assert!(content.contains(if font == 2 { "●" } else { "█" }));
         }
     }
 }
