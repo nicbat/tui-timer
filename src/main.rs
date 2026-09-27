@@ -1,4 +1,6 @@
 mod effects;
+#[cfg(feature = "metrics")]
+mod metrics;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use effects::{CONFETTI_DURATION, THEMES};
 use ratatui::{
@@ -30,6 +32,10 @@ struct Settings {
     rest_seconds: u64,
     cycles: u16,
     font: usize,
+    long_rest_seconds: u64,
+    long_rest_every: u16,
+    final_rest: bool,
+    color_mode: usize,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -47,6 +53,10 @@ impl Default for Settings {
             rest_seconds: 300,
             cycles: 4,
             font: 0,
+            long_rest_seconds: 900,
+            long_rest_every: 0,
+            final_rest: true,
+            color_mode: 0,
         }
     }
 }
@@ -55,12 +65,16 @@ impl Default for Settings {
 struct Config {
     settings: Settings,
     presets: BTreeMap<String, Settings>,
+    drafts: BTreeMap<String, Settings>,
+    scratch: Option<Settings>,
 }
 impl Default for Config {
     fn default() -> Self {
         Self {
             settings: Settings::default(),
             presets: BTreeMap::from([("hang".into(), Settings::default())]),
+            drafts: BTreeMap::new(),
+            scratch: None,
         }
     }
 }
@@ -87,6 +101,15 @@ fn load(path: &PathBuf) -> Result<Config, String> {
         }
         validate(settings)?;
     }
+    for settings in config.drafts.values_mut() {
+        validate(settings)?;
+    }
+    if let Some(scratch) = &mut config.scratch {
+        validate(scratch)?;
+    }
+    config
+        .drafts
+        .retain(|name, _| config.presets.contains_key(name));
     Ok(config)
 }
 fn validate(s: &mut Settings) -> Result<(), String> {
@@ -100,10 +123,14 @@ fn validate(s: &mut Settings) -> Result<(), String> {
         || s.rest_seconds == 0
         || s.rest_seconds > 359999
         || !(1..=99).contains(&s.cycles)
+        || s.long_rest_seconds == 0
+        || s.long_rest_seconds > 359999
+        || s.long_rest_every > 99
+        || s.color_mode > 2
         || s.font > 2
         || (s.stopwatch && s.pomodoro)
     {
-        return Err("Config values out of range: durations 1s–99h59m59s, get ready 0–3600s, cycles 1–99, size 0–8, theme 0–9, font 0–2; choose one mode".into());
+        return Err("Config values out of range: durations 1s–99h59m59s, get ready 0–3600s, cycles 1–99, size 0–8, theme 0–10, font 0–2, long-rest interval 0–99, color mode 0–2; choose one mode".into());
     }
     Ok(())
 }
@@ -186,6 +213,11 @@ fn valid_name(name: &str) -> bool {
             "rest",
             "cycles",
             "font",
+            "long-rest",
+            "long-rest-every",
+            "final-rest",
+            "no-final-rest",
+            "color",
             "timer",
             "stopwatch",
             "hundredths",
@@ -218,14 +250,15 @@ fn args(config: &mut Config, argv: &[String]) -> Result<bool, String> {
                 preset = Some(argv.get(i).ok_or("--preset needs a name")?.clone());
             }
             "--timer" | "--countdown" | "--size" | "--theme" | "--work" | "--rest" | "--cycles"
-            | "--font" => {
+            | "--font" | "--long-rest" | "--long-rest-every" | "--color" => {
                 i += 1;
                 if i >= argv.len() {
                     return Err(format!("{a} needs a value"));
                 }
             }
             "--pomodoro" | "--stopwatch" | "--bell" | "--no-bell" | "--no-countdown"
-            | "--hundredths" | "--no-hundredths" | "--confetti" | "--no-confetti" => {}
+            | "--hundredths" | "--no-hundredths" | "--confetti" | "--no-confetti"
+            | "--final-rest" | "--no-final-rest" => {}
             _ if a.starts_with("--") && config.presets.contains_key(&a[2..]) => {
                 preset = Some(a[2..].into())
             }
@@ -270,6 +303,25 @@ fn args(config: &mut Config, argv: &[String]) -> Result<bool, String> {
             "--cycles" => {
                 i += 1;
                 config.settings.cycles = argv[i].parse().map_err(|_| "Cycles must be 1–99")?;
+            }
+            "--long-rest" => {
+                i += 1;
+                config.settings.long_rest_seconds = duration(&argv[i])?;
+            }
+            "--long-rest-every" => {
+                i += 1;
+                config.settings.long_rest_every = argv[i]
+                    .parse()
+                    .map_err(|_| "Long-rest interval must be 0–99")?;
+            }
+            "--final-rest" => config.settings.final_rest = true,
+            "--no-final-rest" => config.settings.final_rest = false,
+            "--color" => {
+                i += 1;
+                config.settings.color_mode = ["auto", "always", "never"]
+                    .iter()
+                    .position(|v| *v == argv[i])
+                    .ok_or("Color must be auto, always, or never")?;
             }
             "--font" => {
                 i += 1;
@@ -318,6 +370,15 @@ fn args(config: &mut Config, argv: &[String]) -> Result<bool, String> {
 }
 
 impl Settings {
+    fn rest_for(&self, cycle: u16) -> u64 {
+        if cycle == self.cycles && !self.final_rest {
+            0
+        } else if self.long_rest_every > 0 && cycle.is_multiple_of(self.long_rest_every) {
+            self.long_rest_seconds
+        } else {
+            self.rest_seconds
+        }
+    }
     fn mode_name(&self) -> &'static str {
         if self.pomodoro {
             "Pomodoro"
@@ -357,6 +418,7 @@ enum Phase {
     Rest,
     Done,
 }
+#[derive(Clone)]
 struct Clock {
     phase: Phase,
     elapsed: Duration,
@@ -399,9 +461,23 @@ impl Clock {
     fn limit(&self, s: &Settings) -> u64 {
         match self.phase {
             Phase::Prep => s.prep,
-            Phase::Rest => s.rest_seconds,
+            Phase::Rest => s.rest_for(self.cycle),
             _ => s.duration(),
         }
+    }
+    fn skip(&mut self, s: &Settings, now: Instant) -> bool {
+        if !s.pomodoro || !matches!(self.phase, Phase::Running | Phase::Rest) {
+            return false;
+        }
+        let was_paused = self.paused;
+        self.elapsed = Duration::from_secs(self.limit(s));
+        self.anchor = now;
+        self.paused = false;
+        let changed = self.tick(s, now);
+        if self.phase != Phase::Done {
+            self.paused = was_paused;
+        }
+        changed
     }
     fn tick(&mut self, s: &Settings, now: Instant) -> bool {
         if self.paused || matches!(self.phase, Phase::Setup | Phase::Done) {
@@ -421,7 +497,7 @@ impl Clock {
             self.anchor = now;
             match self.phase {
                 Phase::Prep => self.phase = Phase::Running,
-                Phase::Running if s.pomodoro => {
+                Phase::Running if s.pomodoro && s.rest_for(self.cycle) > 0 => {
                     self.phase = Phase::Rest;
                     transitioned = true;
                 }
@@ -448,6 +524,10 @@ enum Field {
     Duration,
     Rest,
     Cycles,
+    LongRest,
+    LongEvery,
+    FinalRest,
+    ColorMode,
     Prep,
     Font,
     Size,
@@ -480,6 +560,8 @@ struct App {
     rendered_scale: u16,
     max_scale: u16,
     celebration: Option<Instant>,
+    suspended: Option<(Clock, Settings, Option<String>)>,
+    no_color: bool,
 }
 impl App {
     fn new(config: Config, path: PathBuf) -> Self {
@@ -497,6 +579,58 @@ impl App {
             rendered_scale: 1,
             max_scale: 8,
             celebration: None,
+            suspended: None,
+            no_color: env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()),
+        }
+    }
+    fn stash_draft(&mut self) {
+        if self.clock.phase != Phase::Setup {
+            return;
+        }
+        if let Some(name) = &self.preset_name {
+            if self.config.presets.get(name) != Some(&self.config.settings) {
+                self.config
+                    .drafts
+                    .insert(name.clone(), self.config.settings.clone());
+            } else {
+                self.config.drafts.remove(name);
+            }
+        } else {
+            self.config.scratch = Some(self.config.settings.clone());
+        }
+    }
+    fn open_settings(&mut self, now: Instant) {
+        if self.clock.phase != Phase::Done {
+            if !self.clock.paused {
+                self.clock.toggle(now);
+            }
+            self.suspended = Some((
+                self.clock.clone(),
+                self.config.settings.clone(),
+                self.preset_name.clone(),
+            ));
+        }
+        self.clock = Clock::new();
+        if let Some(name) = &self.preset_name
+            && let Some(draft) = self.config.drafts.get(name)
+        {
+            self.config.settings = draft.clone();
+        }
+        self.selected = 0;
+        self.celebration = None;
+        self.message = if self.suspended.is_some() {
+            "Session paused. Esc returns; Enter starts new.".into()
+        } else {
+            String::new()
+        };
+    }
+    fn return_to_session(&mut self) {
+        if let Some((clock, settings, name)) = self.suspended.take() {
+            self.stash_draft();
+            self.clock = clock;
+            self.config.settings = settings;
+            self.preset_name = name;
+            self.message.clear();
         }
     }
     fn advance(&mut self, now: Instant) -> bool {
@@ -531,19 +665,27 @@ impl App {
             fields.push(Field::Duration);
         }
         if self.config.settings.pomodoro {
-            fields.extend([Field::Rest, Field::Cycles]);
+            fields.extend([
+                Field::Rest,
+                Field::Cycles,
+                Field::LongEvery,
+                Field::LongRest,
+                Field::FinalRest,
+            ]);
         }
         fields.extend([
             Field::Prep,
             Field::Font,
             Field::Size,
             Field::Theme,
+            Field::ColorMode,
             Field::Bell,
             Field::Confetti,
         ]);
         fields
     }
     fn persist(&mut self) -> bool {
+        self.stash_draft();
         match save(&self.path, &self.config) {
             Ok(()) => {
                 if self.message.starts_with("Couldn't save") {
@@ -597,7 +739,7 @@ impl App {
             }
             KeyCode::Enter => match &input.kind {
                 Edit::Duration(field) => {
-                    let parsed = if *field == Field::Cycles {
+                    let parsed = if matches!(field, Field::Cycles | Field::LongEvery) {
                         input
                             .value
                             .parse::<u64>()
@@ -610,6 +752,7 @@ impl App {
                             if match field {
                                 Field::Prep => n <= 3600,
                                 Field::Cycles => (1..=99).contains(&n),
+                                Field::LongEvery => n <= 99,
                                 _ => n > 0,
                             } =>
                         {
@@ -617,6 +760,8 @@ impl App {
                             match field {
                                 Field::Prep => s.prep = n,
                                 Field::Rest => s.rest_seconds = n,
+                                Field::LongRest => s.long_rest_seconds = n,
+                                Field::LongEvery => s.long_rest_every = n as u16,
                                 Field::Cycles => s.cycles = n as u16,
                                 _ if s.pomodoro => s.work_seconds = n,
                                 _ => s.seconds = n,
@@ -629,7 +774,8 @@ impl App {
                                 Field::Prep => {
                                     "Get-ready countdown: 0 (off) to 3600 seconds.".into()
                                 }
-                                Field::Cycles => "Choose 1–99 work/rest cycles.".into(),
+                                Field::Cycles => "Choose 1–99 work periods.".into(),
+                                Field::LongEvery => "Choose 0–99; zero disables long rests.".into(),
                                 _ => "Use a duration such as 2m or 1:30, greater than zero.".into(),
                             }
                         }
@@ -645,11 +791,23 @@ impl App {
                     } else if self.config.presets.contains_key(name) && !same {
                         self.message = "That name already exists. Choose another name.".into();
                     } else {
+                        self.stash_draft();
                         let settings = match &input.kind {
-                            Edit::Rename(old) => self.config.presets.remove(old).unwrap(),
+                            Edit::Rename(old) => {
+                                if let Some(draft) = self.config.drafts.remove(old) {
+                                    self.config.drafts.insert(name.clone(), draft);
+                                }
+                                self.config.presets.remove(old).unwrap()
+                            }
                             _ => self.config.settings.clone(),
                         };
                         self.config.presets.insert(name.clone(), settings);
+                        if let Edit::Rename(old) = &input.kind
+                            && let Some((_, _, Some(saved_name))) = &mut self.suspended
+                            && saved_name == old
+                        {
+                            *saved_name = name.clone();
+                        }
                         if matches!(&input.kind, Edit::NewPreset)
                             || matches!(&input.kind, Edit::Rename(old) if self.preset_name.as_ref() == Some(old))
                         {
@@ -696,6 +854,12 @@ impl App {
             match key {
                 KeyCode::Char('y') => {
                     self.config.presets.remove(&name);
+                    self.config.drafts.remove(&name);
+                    if let Some((_, _, saved_name)) = &mut self.suspended
+                        && saved_name.as_ref() == Some(&name)
+                    {
+                        *saved_name = None;
+                    }
                     if self.preset_name.as_ref() == Some(&name) {
                         self.preset_name = None;
                     }
@@ -725,7 +889,13 @@ impl App {
                 KeyCode::Char('G') => self.preset_index = len - 1,
                 KeyCode::Enter | KeyCode::Char('e') | KeyCode::Char('l') => {
                     if let Some(name) = self.selected_preset() {
-                        self.config.settings = self.config.presets[&name].clone();
+                        self.stash_draft();
+                        self.config.settings = self
+                            .config
+                            .drafts
+                            .get(&name)
+                            .unwrap_or(&self.config.presets[&name])
+                            .clone();
                         self.preset_name = Some(name.clone());
                         self.selected = 0;
                         self.presets = false;
@@ -746,6 +916,15 @@ impl App {
                             value: name,
                             fresh: true,
                         });
+                    }
+                }
+                KeyCode::Char('u') => {
+                    self.stash_draft();
+                    if let Some(scratch) = &self.config.scratch {
+                        self.config.settings = scratch.clone();
+                        self.preset_name = None;
+                        self.selected = 0;
+                        self.presets = false;
                     }
                 }
                 KeyCode::Char('d') => self.delete = self.selected_preset(),
@@ -796,6 +975,16 @@ impl App {
                         }
                         Field::Duration => s.seconds = adjust(s.seconds, 15, 1, 359999),
                         Field::Rest => s.rest_seconds = adjust(s.rest_seconds, 60, 1, 359999),
+                        Field::LongRest => {
+                            s.long_rest_seconds = adjust(s.long_rest_seconds, 60, 1, 359999)
+                        }
+                        Field::LongEvery => {
+                            s.long_rest_every = adjust(s.long_rest_every as u64, 1, 0, 99) as u16
+                        }
+                        Field::FinalRest => s.final_rest = !s.final_rest,
+                        Field::ColorMode => {
+                            s.color_mode = (s.color_mode + if plus { 1 } else { 2 }) % 3
+                        }
                         Field::Cycles => s.cycles = adjust(s.cycles as u64, 1, 1, 99) as u16,
                         Field::Prep => s.prep = adjust(s.prep, 1, 0, 3600),
                         Field::Hundredths => s.hundredths = !s.hundredths,
@@ -812,19 +1001,26 @@ impl App {
                 KeyCode::Char('e') | KeyCode::Char('i')
                     if matches!(
                         field,
-                        Field::Duration | Field::Prep | Field::Rest | Field::Cycles
+                        Field::Duration
+                            | Field::Prep
+                            | Field::Rest
+                            | Field::Cycles
+                            | Field::LongRest
+                            | Field::LongEvery
                     ) =>
                 {
                     let s = &self.config.settings;
                     let n = match field {
                         Field::Prep => s.prep,
                         Field::Rest => s.rest_seconds,
+                        Field::LongRest => s.long_rest_seconds,
+                        Field::LongEvery => s.long_rest_every as u64,
                         Field::Cycles => s.cycles as u64,
                         _ => s.duration(),
                     };
                     self.input = Some(Input {
                         kind: Edit::Duration(field),
-                        value: if field == Field::Cycles {
+                        value: if matches!(field, Field::Cycles | Field::LongEvery) {
                             n.to_string()
                         } else {
                             display_time(n)
@@ -851,9 +1047,11 @@ impl App {
                         fresh: true,
                     })
                 }
+                KeyCode::Esc => self.return_to_session(),
                 KeyCode::Enter => {
                     self.message.clear();
                     if self.persist() {
+                        self.suspended = None;
                         self.clock.start(&self.config.settings, Instant::now());
                     }
                 }
@@ -872,10 +1070,15 @@ impl App {
                 KeyCode::Enter if self.clock.phase == Phase::Done => {
                     self.clock.start(&self.config.settings, Instant::now())
                 }
-                KeyCode::Esc => {
-                    self.clock = Clock::new();
-                    self.selected = 0;
-                    self.message.clear();
+                KeyCode::Esc => self.open_settings(Instant::now()),
+                KeyCode::Char('n') if self.config.settings.pomodoro => {
+                    let now = Instant::now();
+                    if self.clock.skip(&self.config.settings, now)
+                        && self.clock.phase == Phase::Done
+                        && self.config.settings.confetti
+                    {
+                        self.celebration = Some(now);
+                    }
                 }
                 KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Char('l') => self.zoom(true),
                 KeyCode::Char('-') | KeyCode::Char('h') => self.zoom(false),
@@ -1066,11 +1269,18 @@ fn session_remaining(clock: &Clock, s: &Settings, now: Instant) -> u64 {
         .as_secs_f64()
         .ceil() as u64;
     let future = match clock.phase {
-        Phase::Prep => s.cycles as u64 * (s.work_seconds + s.rest_seconds),
+        Phase::Prep => (1..=s.cycles)
+            .map(|cycle| s.work_seconds + s.rest_for(cycle))
+            .sum(),
         Phase::Running => {
-            s.rest_seconds + (s.cycles - clock.cycle) as u64 * (s.work_seconds + s.rest_seconds)
+            s.rest_for(clock.cycle)
+                + ((clock.cycle + 1)..=s.cycles)
+                    .map(|cycle| s.work_seconds + s.rest_for(cycle))
+                    .sum::<u64>()
         }
-        Phase::Rest => (s.cycles - clock.cycle) as u64 * (s.work_seconds + s.rest_seconds),
+        Phase::Rest => ((clock.cycle + 1)..=s.cycles)
+            .map(|cycle| s.work_seconds + s.rest_for(cycle))
+            .sum(),
         _ => 0,
     };
     current + future
@@ -1087,6 +1297,17 @@ fn running_hint(width: u16, phase: Phase, paused: bool) -> String {
     }
 }
 fn ui(f: &mut Frame, app: &mut App) {
+    ui_content(f, app);
+    if app.config.settings.color_mode == 2
+        || (app.config.settings.color_mode == 0 && app.no_color)
+        || THEMES[app.config.settings.theme].name == "terminal"
+    {
+        for cell in &mut f.buffer_mut().content {
+            cell.set_fg(Color::Reset).set_bg(Color::Reset);
+        }
+    }
+}
+fn ui_content(f: &mut Frame, app: &mut App) {
     let area = f.area();
     let s = &app.config.settings;
     let accent = THEMES[s.theme].accent;
@@ -1126,7 +1347,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         let fields = app.fields();
         let rows = Layout::vertical([
             Constraint::Length(2),
-            Constraint::Length(fields.len() as u16),
+            Constraint::Length((fields.len() as u16).min(area.height.saturating_sub(15))),
             Constraint::Min(5),
             Constraint::Length(3),
             Constraint::Length(1),
@@ -1149,6 +1370,11 @@ fn ui(f: &mut Frame, app: &mut App) {
         let lines = fields
             .iter()
             .enumerate()
+            .skip(
+                app.selected
+                    .saturating_sub(rows[1].height.saturating_sub(1) as usize),
+            )
+            .take(rows[1].height as usize)
             .map(|(i, field)| {
                 let (label, value) = match field {
                     Field::Mode => ("Mode", s.mode_name().into()),
@@ -1161,7 +1387,28 @@ fn ui(f: &mut Frame, app: &mut App) {
                         display_time(s.duration()),
                     ),
                     Field::Rest => ("Rest duration", display_time(s.rest_seconds)),
-                    Field::Cycles => ("Cycles", format!("{} · work + rest each", s.cycles)),
+                    Field::Cycles => ("Cycles", format!("{} work periods", s.cycles)),
+                    Field::LongRest => ("Long rest", display_time(s.long_rest_seconds)),
+                    Field::LongEvery => (
+                        "Long rest every",
+                        if s.long_rest_every == 0 {
+                            "Off".into()
+                        } else {
+                            format!("{} cycles", s.long_rest_every)
+                        },
+                    ),
+                    Field::FinalRest => (
+                        "Final rest",
+                        if s.final_rest {
+                            "Include".into()
+                        } else {
+                            "Skip".into()
+                        },
+                    ),
+                    Field::ColorMode => (
+                        "Color output",
+                        ["Auto · honors NO_COLOR", "Always", "Never"][s.color_mode].into(),
+                    ),
                     Field::Prep => (
                         "Get ready",
                         if s.prep == 0 {
@@ -1223,9 +1470,11 @@ fn ui(f: &mut Frame, app: &mut App) {
             display_time(s.duration())
         };
         let preview_area = if s.pomodoro {
-            let columns =
-                Layout::horizontal([Constraint::Percentage(75), Constraint::Percentage(25)])
-                    .split(rows[2]);
+            let columns = Layout::horizontal([
+                Constraint::Min(0),
+                Constraint::Length(if panel.width < 64 { 12 } else { 18 }),
+            ])
+            .split(rows[2]);
             let rest_area = centered(columns[1], 18, 5);
             f.render_widget(
                 Paragraph::new(format!("\n{}", display_time(s.rest_seconds)))
@@ -1241,7 +1490,22 @@ fn ui(f: &mut Frame, app: &mut App) {
         let (scale, fit) = big_digits(f, preview_area, &preview, s.size, s.font, accent);
         app.rendered_scale = scale;
         app.max_scale = fit;
-        f.render_widget(Paragraph::new("↑↓ / j k select   ←→ / h l change   e / i type\nEnter start   p presets   s save edits   n new preset\na auto-fit   q quit").centered().style(muted),rows[3]);
+        let setup_hint = format!(
+            "j/k select ({}/{})  h/l change  e/i type\nEnter {}  p presets  s save  n new\na auto-fit  {}q quit",
+            app.selected + 1,
+            fields.len(),
+            if app.suspended.is_some() {
+                "new session"
+            } else {
+                "start"
+            },
+            if app.suspended.is_some() {
+                "Esc return paused  "
+            } else {
+                ""
+            }
+        );
+        f.render_widget(Paragraph::new(setup_hint).centered().style(muted), rows[3]);
         f.render_widget(
             Paragraph::new(app.message.as_str())
                 .centered()
@@ -1308,6 +1572,12 @@ fn ui(f: &mut Frame, app: &mut App) {
         );
         if s.pomodoro {
             let stage = match app.clock.phase {
+                Phase::Rest
+                    if s.long_rest_every > 0
+                        && app.clock.cycle.is_multiple_of(s.long_rest_every) =>
+                {
+                    "Long rest"
+                }
                 Phase::Rest => "Rest",
                 Phase::Prep => "Ready",
                 Phase::Done => "Finished",
@@ -1344,7 +1614,10 @@ fn ui(f: &mut Frame, app: &mut App) {
                 centered(rows[3], area.width.saturating_sub(8).min(90), 1),
             );
         }
-        let hint = running_hint(area.width, app.clock.phase, paused);
+        let mut hint = running_hint(area.width, app.clock.phase, paused);
+        if s.pomodoro && matches!(app.clock.phase, Phase::Running | Phase::Rest) {
+            hint = hint.replace("r restart", "r restart  n skip");
+        }
         f.render_widget(Paragraph::new(hint).centered().style(muted), rows[4]);
     }
     if app.presets {
@@ -1380,8 +1653,13 @@ fn ui(f: &mut Frame, app: &mut App) {
             .take(capacity)
             .map(|(i, (name, s))| {
                 Line::from(format!(
-                    "{} --{name}   {}",
+                    "{} --{name}{}   {}",
                     if i == app.preset_index { "›" } else { " " },
+                    if app.config.drafts.contains_key(name) {
+                        " *draft"
+                    } else {
+                        ""
+                    },
                     s.summary()
                 ))
                 .style(if i == app.preset_index {
@@ -1401,7 +1679,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             }),
             rows[1],
         );
-        f.render_widget(Paragraph::new("j/k or ↑↓ select   Enter / e edit   r rename\nn new from current setup   d delete\nEsc back").style(muted),rows[2]);
+        f.render_widget(Paragraph::new("j/k or ↑↓ select   Enter / e edit   r rename\nn new from current setup   d delete\nu unnamed setup   Esc back").style(muted),rows[2]);
         f.render_widget(Paragraph::new(app.message.as_str()).style(accent), rows[3]);
     }
     if let Some(input) = &app.input {
@@ -1411,6 +1689,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             Edit::NewPreset => " New preset ",
             Edit::Rename(_) => " Rename preset ",
             Edit::Duration(Field::Cycles) => " Number of cycles ",
+            Edit::Duration(Field::LongEvery) => " Long rest every · 0 disables ",
             Edit::Duration(Field::Prep) => " Get-ready countdown · 0 turns it off ",
             _ => " Duration · e.g. 25m or 1:30 ",
         };
@@ -1504,6 +1783,9 @@ fn run() -> Result<(), String> {
         save(&app.path, &app.config)?;
         app.clock.start(&app.config.settings, Instant::now());
     }
+    crossterm::style::force_color_output(true);
+    #[cfg(feature = "metrics")]
+    let mut render_metrics = metrics::Metrics::default();
     let mut terminal = ratatui::init();
     let result = (|| -> io::Result<()> {
         loop {
@@ -1514,10 +1796,19 @@ fn run() -> Result<(), String> {
                 print!("\x07");
                 io::stdout().flush()?;
             }
+            #[cfg(feature = "metrics")]
+            let render_started = Instant::now();
             terminal.draw(|f| ui(f, &mut app))?;
+            #[cfg(feature = "metrics")]
+            render_metrics.record(render_started.elapsed(), app.celebration.is_some());
             // Static screens block for input/resize; active timing and confetti
             // keep a bounded animation cadence. A resize wakes event::read too.
-            if animate && !event::poll(Duration::from_millis(33))? {
+            let frame_budget = if app.clock.phase == Phase::Done {
+                50
+            } else {
+                33
+            };
+            if animate && !event::poll(Duration::from_millis(frame_budget))? {
                 continue;
             }
             if let Event::Key(key) = event::read()?
@@ -1535,6 +1826,10 @@ fn run() -> Result<(), String> {
         Ok(())
     })();
     ratatui::restore();
+    #[cfg(feature = "metrics")]
+    if let Some(path) = env::var_os("TUI_TIMER_METRICS") {
+        render_metrics.write(std::path::Path::new(&path))?;
+    }
     result.map_err(|e| e.to_string())?;
     if app.message.starts_with("Couldn't save") {
         return Err(app.message);
@@ -1953,5 +2248,128 @@ mod tests {
         assert!(!app.key(KeyCode::Char('q')));
         assert!(app.message.starts_with("Couldn't save"));
         std::fs::remove_file(blocker).unwrap();
+    }
+    #[test]
+    fn long_rests_final_policy_and_skip_keep_totals_consistent() {
+        let settings = Settings {
+            pomodoro: true,
+            work_seconds: 10,
+            rest_seconds: 2,
+            long_rest_seconds: 5,
+            long_rest_every: 2,
+            cycles: 4,
+            final_rest: false,
+            prep: 0,
+            ..Settings::default()
+        };
+        let start = Instant::now();
+        let mut clock = Clock::new();
+        clock.start(&settings, start);
+        assert_eq!(session_remaining(&clock, &settings, start), 49);
+        clock.tick(&settings, start + Duration::from_secs(22));
+        assert_eq!((clock.phase, clock.cycle), (Phase::Rest, 2));
+        assert_eq!(clock.limit(&settings), 5);
+        clock.toggle(start + Duration::from_secs(23));
+        clock.skip(&settings, start + Duration::from_secs(100));
+        assert_eq!(
+            (clock.phase, clock.cycle, clock.paused),
+            (Phase::Running, 3, true)
+        );
+        assert_eq!(
+            session_remaining(&clock, &settings, start + Duration::from_secs(100)),
+            22
+        );
+        clock.skip(&settings, start + Duration::from_secs(101));
+        assert_eq!((clock.phase, clock.cycle), (Phase::Rest, 3));
+        clock.skip(&settings, start + Duration::from_secs(102));
+        clock.skip(&settings, start + Duration::from_secs(103));
+        assert_eq!(clock.phase, Phase::Done);
+        assert_eq!(session_remaining(&clock, &settings, start), 0);
+    }
+    #[test]
+    fn settings_roundtrip_preserves_clock_and_separate_draft() {
+        let mut app = App::new(Config::default(), PathBuf::new());
+        app.preset_name = Some("hang".into());
+        let start = Instant::now();
+        app.config.settings.prep = 0;
+        app.clock.start(&app.config.settings, start);
+        app.open_settings(start + Duration::from_millis(1250));
+        app.config.settings.seconds = 180;
+        app.return_to_session();
+        assert!(app.clock.paused);
+        assert_eq!(
+            app.clock.elapsed_at(start + Duration::from_secs(90)),
+            Duration::from_millis(1250)
+        );
+        assert_eq!(app.config.settings.seconds, 120);
+        assert_eq!(app.config.drafts["hang"].seconds, 180);
+        app.stash_draft();
+        assert_eq!(app.config.drafts["hang"].seconds, 180);
+        app.open_settings(start + Duration::from_secs(91));
+        assert_eq!(app.config.settings.seconds, 180);
+    }
+    #[test]
+    fn preset_switches_restore_drafts_and_keep_saved_values_unchanged() {
+        let mut config = Config::default();
+        config.presets.insert("second".into(), Settings::default());
+        let mut app = App::new(config, PathBuf::new());
+        app.preset_name = Some("hang".into());
+        app.config.settings.seconds = 333;
+        app.presets = true;
+        app.preset_index = 1;
+        app.key(KeyCode::Enter);
+        assert_eq!(app.config.settings.seconds, 120);
+        app.presets = true;
+        app.preset_index = 0;
+        app.key(KeyCode::Enter);
+        assert_eq!(app.config.settings.seconds, 333);
+        assert_eq!(app.config.presets["hang"].seconds, 120);
+        let restored: Config = toml::from_str(&toml::to_string(&app.config).unwrap()).unwrap();
+        assert_eq!(restored.drafts["hang"].seconds, 333);
+    }
+    #[test]
+    fn color_policy_precedence_is_explicit() {
+        let mut app = App::new(Config::default(), PathBuf::new());
+        app.no_color = true;
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        for mode in [0, 2] {
+            app.config.settings.color_mode = mode;
+            terminal.draw(|f| ui(f, &mut app)).unwrap();
+            assert!(
+                terminal
+                    .backend()
+                    .buffer()
+                    .content
+                    .iter()
+                    .all(|c| c.fg == Color::Reset && c.bg == Color::Reset)
+            );
+        }
+        app.config.settings.color_mode = 1;
+        terminal.draw(|f| ui(f, &mut app)).unwrap();
+        assert!(
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .any(|c| c.fg == THEMES[0].accent)
+        );
+        let mut config = Config::default();
+        args(
+            &mut config,
+            &[
+                "--color".into(),
+                "never".into(),
+                "--long-rest-every".into(),
+                "2".into(),
+                "--long-rest".into(),
+                "10m".into(),
+                "--no-final-rest".into(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(config.settings.long_rest_every, 2);
+        assert_eq!(config.settings.long_rest_seconds, 600);
+        assert!(!config.settings.final_rest);
     }
 }

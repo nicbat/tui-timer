@@ -241,6 +241,60 @@ with tempfile.TemporaryDirectory() as temp:
         terminal.send('\x1b')
         terminal.close()
 
+    terminal = Terminal(config, '--pomodoro', '--work', '30s', '--rest', '1s', '--long-rest', '2s', '--long-rest-every', '2', '--cycles', '2', '--no-final-rest', '--no-countdown')
+    terminal.expect('Work · cycle 1 of 2')
+    terminal.send('n')
+    terminal.expect('Rest · cycle 1 of 2')
+    terminal.send('n')
+    terminal.expect('Work · cycle 2 of 2')
+    terminal.send('n')
+    terminal.expect('Complete')
+    terminal.close()
+
+    terminal = Terminal(config, '--timer', '2m', '--no-countdown')
+    terminal.expect('Space pause')
+    terminal.send('\x1b')
+    terminal.expect('Session paused.')
+    terminal.send('je3m\r')
+    terminal.send('\x1b')
+    terminal.expect('Space to resume')
+    frozen=terminal.read()
+    terminal.read(.3)
+    assert terminal.read()==frozen
+    terminal.send(' ')
+    terminal.expect('Space pause')
+    terminal.close()
+
+    terminal = Terminal(config)
+    terminal.expect('T I M E R')
+    terminal.send('pge')
+    terminal.expect('--focus')
+    terminal.send('je17m\r')
+    terminal.send('pGe')
+    terminal.send('pge')
+    terminal.expect('17:00')
+    terminal.close()
+    data=tomllib.loads(config.read_text())
+    assert data['drafts']['focus']['work_seconds']==1020
+    assert data['presets']['focus']['work_seconds']==1500
+
+    terminal = Terminal(config)
+    terminal.expect('T I M E R')
+    terminal.send('pge')
+    terminal.expect('17:00')
+    terminal.close()
+
+    terminal = Terminal(config, '--pomodoro', '--work', '1s', '--rest', '1s', '--long-rest', '2s', '--long-rest-every', '2', '--cycles', '3', '--no-final-rest', '--no-countdown')
+    terminal.expect('Long rest · cycle 2 of 3', timeout=6)
+    terminal.expect('Work · cycle 3 of 3')
+    terminal.expect('Complete')
+    terminal.close()
+
+    terminal = Terminal(config, '--theme', 'terminal', '--timer', '1s', '--no-countdown')
+    terminal.expect('Complete')
+    assert all(cell.fg == 'default' and cell.bg == 'default' for row in terminal.screen.buffer.values() for cell in row.values())
+    terminal.close()
+
     timings = []
     for _ in range(10):
         terminal = Terminal(config)

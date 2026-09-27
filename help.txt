@@ -11,12 +11,16 @@ OPTIONS
   --hundredths / --no-hundredths     Show/hide stopwatch hundredths
   --work DURATION                   Pomodoro work period (default 25m)
   --rest DURATION                   Pomodoro rest period (default 5m)
-  --cycles 1–99                     Work/rest pairs (default 4)
+  --cycles 1–99                     Work periods (default 4)
+  --long-rest DURATION              Longer break duration (default 15m)
+  --long-rest-every 0–99             Long break every N cycles; 0 disables
+  --final-rest / --no-final-rest     Include/skip the last break
   --countdown 5s                    Get ready once before starting
   --no-countdown                    Start immediately
   --size auto|1–8                   Digit scale, clamped to terminal
   --font block|slim|dots             Digit style
   --theme NAME                      Accent theme (see names below)
+  --color auto|always|never          Auto honors NO_COLOR; always overrides it
   --confetti / --no-confetti         Optional five-second completion effect
   --bell / --no-bell                Terminal bell at transitions/finish
   --preset NAME                     Start a saved preset
@@ -29,16 +33,20 @@ SETUP
   Enter starts. p opens presets; s saves edits; n saves a new preset.
   Presets: Enter / e edit, r rename, d delete, n new, Esc back.
   g / G selects the first / last setting or preset.
+  Settings pause the session: Esc returns paused; Enter starts anew.
+  Preset drafts survive switching/restarts; s commits them to the preset.
+  u in the preset manager returns to the unnamed setup.
 
 RUNNING
   Space pauses/resumes; r restarts; Esc returns to setup; q quits.
   -/+ or h/l zoom; a restores auto-fit. Shrinking stops at size 1.
   Pomodoro shows work/rest, cycle number, and total session time left.
-  Each cycle includes a rest, including the final cycle.
+  n skips the current Pomodoro work/rest phase.
+  Defaults include the final rest; configure long breaks or skip the last rest.
   After completion: c replays confetti; Space dismisses it.
 
 THEMES
-  mint, amber, ice, mono, lavender, rose, coral, ocean, lime, sand
+  mint, amber, ice, mono, lavender, rose, coral, ocean, lime, sand, terminal
 
 Settings: OS config directory (TUI_TIMER_CONFIG overrides the file).
 Durations: 120, 2m, 1m30s, 2:00. Get ready: 0–3600 seconds.

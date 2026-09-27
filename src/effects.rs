@@ -1,4 +1,4 @@
-use ratatui::{prelude::*, widgets::Paragraph};
+use ratatui::prelude::*;
 use std::time::Duration;
 
 pub struct Theme {
@@ -59,6 +59,11 @@ pub const THEMES: &[Theme] = &[
         label: "Sand",
         accent: Color::Rgb(224, 207, 170),
     },
+    Theme {
+        name: "terminal",
+        label: "Terminal",
+        accent: Color::Reset,
+    },
 ];
 pub const CONFETTI_DURATION: Duration = Duration::from_secs(5);
 
@@ -90,10 +95,12 @@ pub fn confetti(f: &mut Frame, area: Rect, elapsed: Duration, accent: Color) {
         let origin = ((seed >> 16) % 1000) as f32 / 1000.0 * area.width as f32;
         let drift = ((i % 7) as f32 - 3.0) * age;
         let x = (origin + drift).rem_euclid(area.width as f32) as u16;
-        f.render_widget(
-            Paragraph::new(["*", "+", "."][i as usize % 3])
-                .style(palette[i as usize % palette.len()]),
-            Rect::new(area.x + x, area.y + y as u16, 1, 1),
-        );
+        // A particle occupies exactly one terminal cell. Writing that cell avoids
+        // building a text layout and Paragraph for every particle on every frame.
+        // cell_mut also clips safely if a caller supplies a partially offscreen area.
+        if let Some(cell) = f.buffer_mut().cell_mut((area.x + x, area.y + y as u16)) {
+            cell.set_symbol(["*", "+", "."][i as usize % 3])
+                .set_fg(palette[i as usize % palette.len()]);
+        }
     }
 }

@@ -26,17 +26,32 @@ W3C recommends that unnecessary motion can be disabled, and describes pause/stop
 
 Keep Work/Rest labels and the pause symbol when adding colors: phase must remain understandable without distinguishing hues. Preserve a monochrome option, and check every theme's normal text, selected row, paused digits, and modal text against its background. The preview is the right place to show a palette before starting. [W3C use of color](https://www.w3.org/WAI/WCAG22/Understanding/use-of-color.html)
 
-## Deferred improvements and decisions
+## Earlier backlog: implemented after user approval
 
-These are notes for a future conversation, not features authorized for automatic expansion during this review.
+- **Preset drafts:** unsaved named edits are retained when switching and across app
+  restarts. Saved presets remain separate; `s` commits a draft, and `--NAME` launches
+  the saved values. The unnamed setup can be recalled with `u` in the manager.
+- **Settings and resume:** opening settings pauses/snapshots the current session.
+  Esc returns to it still paused, preserving exact elapsed time. Edits remain separate;
+  Enter starts a new session explicitly. Saving a preset does not retime the snapshot.
+- **Long/final rests:** optional long rests every N work periods, plus an include/skip
+  final-rest choice. Defaults preserve the original cycle policy. Remaining session
+  time accounts for these choices.
+- **Skip phase:** `n` advances the current Pomodoro work/rest period, preserving pause
+  state and applying cycle/final-rest rules. It removes skipped time from the total.
+- **Terminal colors:** Terminal theme inherits the emulator's foreground/background.
+  Auto honors nonempty `NO_COLOR`; Always is an explicit config/CLI override; Never
+  uses default colors. Terminal theme stays terminal-native in every policy.
+  [NO_COLOR specification and FAQ](https://no-color.org/)
 
-- **Preserve unsaved preset edits when loading another preset.** Currently loading replaces the working setup, as documented. A small draft cache or explicit discard indication could make editing safer. Choose the interaction deliberately; a confirmation on every load would slow the primary flow.
-- **Return from settings without resetting a running session.** Esc currently opens setup by resetting the clock. A future edit/resume distinction could help accidental Esc presses, but raises questions about applying changed durations and Pomodoro cycles mid-session. For now, document the reset behavior clearly.
-- **Pomodoro long rests and final-rest policy.** Current cycles consistently include work plus rest, including the last rest. Optional longer breaks every N cycles or omitting the final rest are plausible additions, but increase setup complexity. Keep the existing policy visible and predictable until requested.
-- **Skip the current Pomodoro phase.** Potentially useful after an interruption, but requires a decision about cycle counts, elapsed totals, and accidental activation. It should not reuse Vim navigation keys while running.
-- **Terminal-native color preference and `NO_COLOR`.** Crossterm already honors `NO_COLOR` when emitting terminal styles. A separate terminal-default palette and deliberate override controls remain possible additions. The informal NO_COLOR convention permits explicit configuration and CLI arguments to override the environment. Define precedence and test both light and dark terminals before adding it. [NO_COLOR specification and FAQ](https://no-color.org/)
-- **Plain-text accessibility mode.** Block, Slim, and Dots are visual digit renderings; screen-reader usefulness cannot be assumed. A plain-text time display with low-frequency announcements would need actual assistive-technology testing. Do not advertise screen-reader support based solely on keyboard access.
-- **Desktop notifications, session restoration, history, and statistics.** These could help timers running out of sight, but add platform integration, storage, and product complexity. Keep them on the backlog rather than introducing background services or databases into the fast-launch app.
+## Still deferred, at the user's request
+
+- **Plain-text accessibility mode.** Block, Slim, and Dots are visual digit renderings;
+  screen-reader usefulness cannot be assumed. This would need assistive-technology
+  testing, and remains deferred.
+- **Desktop notifications, session restoration across process exits, history, and
+  statistics.** These would add platform integration and storage. They remain deferred;
+  in-process settings/resume is implemented without a background service.
 
 ## Comparable apps and research implications
 

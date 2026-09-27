@@ -49,7 +49,7 @@ Adaptive timer redraw based on the next digit or progress-bar change could reduc
 
 The static-redraw fix is implemented. Setup, paused, and completed screens block on
 terminal events; keyboard input and resize wake them immediately. Timers and
-stopwatches retain a 33 ms frame budget. Confetti animates for five seconds only,
+stopwatches retain a 33 ms frame budget. Confetti uses a 50 ms frame budget and animates for five seconds only,
 then clears and returns to static rendering. It starts only on the final `Done`
 transition, never on an intermediate Pomodoro break. Space dismisses it immediately.
 
@@ -69,3 +69,5 @@ No startup-performance claim should be inferred from the old 16 ms figures.
 
 Direct glyph-buffer rendering/caching remains deferred until profiling shows a
 material residual need. No dependency was added for the bounded 100-particle effect.
+
+The subsequent [confetti performance work](confetti-performance.md) adds a fixed-reference renderer benchmark and optional per-frame metrics build.
